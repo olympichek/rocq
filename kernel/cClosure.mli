@@ -46,7 +46,7 @@ type fterm =
   | FFix of fixpoint * usubs * gfix
   | FCoFix of cofixpoint * usubs
   | FCaseT of case_info * UVars.Instance.t * constr array * case_return * fconstr * case_branch array * usubs (* predicate and branches are closures *)
-  | FCaseInvert of case_info * UVars.Instance.t * constr array * case_return * finvert * fconstr * case_branch array * usubs
+  | FCaseInvert of case_info * UVars.Instance.t * constr array * case_return * finvert * constr * case_branch array * usubs
   | FLambda of int * (Name.t binder_annot * constr) list * constr * usubs
   | FProd of Name.t binder_annot * fconstr * constr * usubs
   | FLetIn of Name.t binder_annot * fconstr * fconstr * constr * usubs
@@ -141,9 +141,12 @@ val lookup_constant_handler : env -> evar_handler -> Constant.t ->
   (unit, (unit -> Vmemitcodes.to_patch) Vmemitcodes.pbody_code) Declarations.pconstant_body
 
 val create_conv_infos :
-  ?univs:UGraph.t -> ?evars:evar_handler -> reds -> env -> clos_infos
+  ?univs:UGraph.t -> ?evars:evar_handler -> ?force:bool -> reds -> env -> clos_infos
+  (* force flag assumes the term to be an applied constant unfolding to a fix and tells
+     to try to reduce the underlying fix even if this constant is not declared to be
+     unfoldable; if the underlying fix is not reducible, keep the constant as is *)
 val create_clos_infos :
-  ?univs:UGraph.t -> ?evars:evar_handler -> reds -> env -> clos_infos
+  ?univs:UGraph.t -> ?evars:evar_handler -> ?force:bool -> reds -> env -> clos_infos
 val oracle_of_infos : clos_infos -> Conv_oracle.oracle
 
 val create_tab : unit -> clos_tab

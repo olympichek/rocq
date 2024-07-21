@@ -75,7 +75,7 @@ type table_key = Constant.t UVars.puniverses tableKey
 
 type evar_repack = Evar.t * constr list -> constr
 
-type gfix = Constr.t option
+type gfix = (bool * Constr.t) option
 
 type fconstr = {
   mutable mark : red_state;
@@ -93,7 +93,7 @@ and fterm =
   | FFix of fixpoint * usubs * gfix
   | FCoFix of cofixpoint * usubs
   | FCaseT of case_info * UVars.Instance.t * constr array * case_return * fconstr * case_branch array * usubs (* predicate and branches are closures *)
-  | FCaseInvert of case_info * UVars.Instance.t * constr array * case_return * finvert * fconstr * case_branch array * usubs
+  | FCaseInvert of case_info * UVars.Instance.t * constr array * case_return * finvert * constr * case_branch array * usubs
   | FLambda of int * (Name.t binder_annot * constr) list * constr * usubs
   | FProd of Name.t binder_annot * fconstr * constr * usubs
   | FLetIn of Name.t binder_annot * fconstr * fconstr * constr * usubs
@@ -174,6 +174,7 @@ type infos_cache = {
 
 type clos_infos = {
   i_flags : reds;
+  i_force : bool;
   i_relevances : Sorts.relevance Range.t;
   i_cache : infos_cache }
 
@@ -563,13 +564,20 @@ let rec to_constr lfts v =
     | FInd op -> mkIndU op
     | FConstruct (op,args) -> mkApp (mkConstructU op, Array.Fun1.map to_constr lfts args)
     | FCaseT (ci, u, pms, p, c, ve, env) ->
-      to_constr_case lfts ci u pms p NoInvert c ve env
+      to_constr_case lfts ci u pms p NoInvert (to_constr lfts c) ve env
     | FCaseInvert (ci, u, pms, p, indices, c, ve, env) ->
       let iv = CaseInvert {indices=Array.Fun1.map to_constr lfts indices} in
       to_constr_case lfts ci u pms p iv c ve env
-    | FFix ((op,(lna,tys,bds)) as fx, e, _) ->
+    | FFix (_, e, Some (true,gfix)) ->
       if is_subs_id (fst e) && is_lift_id lfts then
-        subst_instance_constr (snd e) (mkFix fx)
+        subst_instance_constr (snd e) gfix
+      else
+        let subs_ty = comp_subs lfts e in
+        subst_constr subs_ty gfix
+    | FFix ((op,(lna,tys,bds)) as fx, e, gfix) ->
+      let fix = match gfix with Some (true,f) -> f | _ -> mkFix fx in
+      if is_subs_id (fst e) && is_lift_id lfts then
+        subst_instance_constr (snd e) fix
       else
         let n = Array.length bds in
         let subs_ty = comp_subs lfts e in
@@ -654,7 +662,7 @@ and to_constr_case lfts ci u pms (p,r) iv c ve env =
   let subs = comp_subs lfts env in
   let r = usubst_relevance subs r in
   if is_subs_id (fst env) && is_lift_id lfts then
-    mkCase (ci, usubst_instance subs u, pms, (p,r), iv, to_constr lfts c, ve)
+    mkCase (ci, usubst_instance subs u, pms, (p,r), iv, c, ve)
   else
     let f_ctx (nas, c) =
       let nas = Array.map (usubst_binder subs) nas in
@@ -666,7 +674,7 @@ and to_constr_case lfts ci u pms (p,r) iv c ve env =
             Array.map (fun c -> subst_constr subs c) pms,
             (f_ctx p,r),
             iv,
-            to_constr lfts c,
+            c,
             Array.map f_ctx ve)
 
 and comp_subs el (s,u') =
@@ -1025,7 +1033,7 @@ let contract_fix_vect fix =
            (fun j -> { mark = Cstr;
                        term = FFix (((reci,j),rdcl),env, None) }),
            env, Array.length bds)
-      | FFix (((reci,i),(_,_,bds as rdcl)),env, Some refold) -> (* FIXME *)
+      | FFix (((reci,i),(_,_,bds as rdcl)),env, Some (_,refold)) -> (* FIXME *)
           (bds.(i),
            (fun j -> if Int.equal i j then
               { mark = Cstr; term = FCLOS (refold, env) }
@@ -1450,7 +1458,7 @@ and knht info e t stk =
       if is_irrelevant info (usubst_relevance e r) then
         (mk_irrelevant, skip_irrelevant_stack info stk)
       else
-        let term = FCaseInvert (ci, u, pms, p, (Array.map (mk_clos e) indices), mk_clos e t, br, e) in
+        let term = FCaseInvert (ci, u, pms, p, (Array.map (mk_clos e) indices), t, br, e) in
         { mark = Red; term }, stk
     | Fix (((_, n), (lna, _, _)) as fx) ->
       if is_irrelevant info (usubst_relevance e (lna.(n)).binder_relevance) then
@@ -1913,17 +1921,21 @@ let rec knr : 'a. _ -> _ -> pat_state: 'a depth -> _ -> _ -> 'a =
       (match get_args n tys f e stk with
           Inl e', s -> knit info tab ~pat_state e' f s
         | Inr lam, s -> knr_ret info tab ~pat_state (lam,s))
-  | FFlex fl when red_set info.i_flags fDELTA ->
-      (match Table.lookup info tab fl with
+  | FFlex fl when red_set info.i_flags fDELTA || (info.i_force && match fl with ConstKey _ -> true | RelKey _ | VarKey _ -> false) ->
+      let force = info.i_force in
+      let info0, info = if info.i_force then
+          { info with i_flags = match fl with ConstKey c -> RedFlags.red_add info.i_flags (fCONST (fst c)) | RelKey _ | VarKey _ -> info.i_flags },
+          { info with i_force = false } else info, info in
+      (match Table.lookup info0 tab fl with
         | Def (v, None, _) -> kni info tab ~pat_state v stk
         | Def (v, Some gfix, _) ->
           if Int.equal gfix.gfix_nargs 0 then
-              let refold = Some gfix.gfix_refold in
+              let refold = Some (force, gfix.gfix_refold) in
               kni info tab { mark = Cstr; term = FFix (gfix.gfix_body, (subs_id 0, gfix.gfix_univs), refold) } ~pat_state stk
           else if red_set info.i_flags fBETA then
             match get_args gfix.gfix_nargs gfix.gfix_tys (mkFix gfix.gfix_body) (subs_id 0, gfix.gfix_univs) stk with
             | Inl e, stk ->
-              let refold = Some gfix.gfix_refold in
+              let refold = Some (force, gfix.gfix_refold) in
               kni info tab { mark = Cstr; term = FFix (gfix.gfix_body, e, refold) } ~pat_state stk
             | Inr lam, stk -> knr_ret info tab ~pat_state (lam, stk)
           else kni info tab v ~pat_state stk
@@ -2007,12 +2019,18 @@ let rec knr : 'a. _ -> _ -> pat_state: 'a depth -> _ -> _ -> 'a =
            kni info tab ~pat_state a (Zprimitive(op,c,rargs,nargs)::s)
              end
      | (depth, _, _, stk) -> knr_ret info tab ~pat_state (m,zshift depth stk))
-  | FCaseInvert (ci, u, pms, _p,iv,_c,v,env) when red_set info.i_flags fMATCH ->
-    let pms = mk_clos_vect env pms in
+  | FCaseInvert (ci, u, pms, p,iv,c,v,env) when red_set info.i_flags fMATCH ->
+    let pms' = mk_clos_vect env pms in
     let u = usubst_instance env u in
-    begin match case_inversion info tab ci u pms iv v with
+    begin match case_inversion info tab ci u pms' iv v with
       | Some c -> knit info tab ~pat_state env c stk
-      | None -> knr_ret info tab ~pat_state (m, stk)
+      | None ->
+        match info.i_cache.i_mode with
+        | Conversion -> knr_ret info tab ~pat_state (m, stk)
+        | Reduction ->
+          let c = term_of_fconstr (fapp_stack (knht info env c [])) in
+          let m = {m with term = FCaseInvert (ci, u, pms, p,iv,c,v,env)} in
+          knr_ret info tab ~pat_state (m, stk)
     end
   | FIrrelevant ->
     let stk = skip_irrelevant_stack info stk in
@@ -2259,12 +2277,12 @@ let whd_stack infos tab m stk = match m.mark with
   in
   k
 
-let create_infos i_mode ?univs ?evars i_flags i_env =
+let create_infos i_mode ?univs ?evars ?(force=false) i_flags i_env =
   let evars = Option.default (default_evar_handler i_env) evars in
   let i_univs = Option.default (Environ.universes i_env) univs in
   let i_share = (Environ.typing_flags i_env).Declarations.share_reduction in
   let i_cache = {i_env; i_sigma = evars; i_share; i_univs; i_mode} in
-  {i_flags; i_relevances = Range.empty; i_cache}
+  {i_flags; i_relevances = Range.empty; i_cache; i_force = force}
 
 let create_conv_infos = create_infos Conversion
 let create_clos_infos = create_infos Reduction
@@ -2279,12 +2297,12 @@ let unfold_ref_with_args infos tab fl v =
   | Def (def, None, _) -> Some (def, v)
   | Def (def, Some gfix, _) ->
     if Int.equal gfix.gfix_nargs 0 then
-      let refold = Some gfix.gfix_refold in
+      let refold = Some (false, gfix.gfix_refold) in
       Some ({ mark = Cstr; term = FFix (gfix.gfix_body, (subs_id 0, gfix.gfix_univs), refold) }, v)
     else if red_set infos.i_flags fBETA then
       match get_args gfix.gfix_nargs gfix.gfix_tys (mkFix gfix.gfix_body) (subs_id 0, gfix.gfix_univs) v with
       | Inl e, stk ->
-        let refold = Some gfix.gfix_refold in
+        let refold = Some (false, gfix.gfix_refold) in
         Some ({ mark = Cstr; term = FFix (gfix.gfix_body, e, refold) }, stk)
       | Inr _, _ -> Some (def, v)
     else Some (def, v)

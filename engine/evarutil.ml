@@ -22,10 +22,10 @@ module ERelevance = EConstr.ERelevance
 module RelDecl = Context.Rel.Declaration
 module NamedDecl = Context.Named.Declaration
 
-let create_clos_infos env sigma flags =
+let create_clos_infos env sigma ?(force=false) flags =
   let open CClosure in
   let evars = Evd.evar_handler sigma in
-  create_clos_infos ~univs:(Evd.universes sigma) ~evars flags env
+  create_clos_infos ~univs:(Evd.universes sigma) ~evars ~force flags env
 
 
 (****************************************************)

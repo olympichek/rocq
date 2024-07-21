@@ -116,7 +116,7 @@ val judge_of_new_Type : evar_map -> evar_map * unsafe_judgment
 
 (***********************************************************)
 
-val create_clos_infos : env -> evar_map -> RedFlags.reds -> CClosure.clos_infos
+val create_clos_infos : env -> evar_map -> ?force:bool -> RedFlags.reds -> CClosure.clos_infos
 
 val whd_evar :  evar_map -> constr -> constr
 val nf_evar :  evar_map -> constr -> constr

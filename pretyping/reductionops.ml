@@ -1606,20 +1606,62 @@ let is_sort env sigma t =
   | Sort s -> true
   | _ -> false
 
+let unfold_constant_hiding_global_fix env sigma whd_opt test_constructor (t, stack) =
+  match kind sigma t with
+  | Const (cst,u) ->
+    let u' = EInstance.kind sigma u in
+    (try
+      (* if t is a constant... *)
+      let c = EConstr.of_constr (Environ.constant_value_in env (cst, u')) in
+      let lams, b = decompose_lambda sigma c in
+      let f, a = decompose_app sigma b in
+      (* ... that unfolds to [fun vars => (fix ...) ... *)
+      if Array.length a = 0 && isFix sigma f then
+        let (t', stack') = whd_state_gen RedFlags.beta env sigma (c, stack) in
+        (* ... that has enough arguments to trigger a reduction ... *)
+        match Stack.strip_app stack' with
+        | args, (Stack.Fix (fix,st) :: _) ->
+          begin match test_constructor (whd_opt (t', args)) with
+          (* ... and whose main argument reduces to a constructor ... *)
+          | Some (t_o, args) when isConstruct sigma t_o ->
+            let i = List.length lams + Stack.args_size st in
+            (match Stack.strip_n_app i stack with
+            | Some (st1, _, st2) ->
+              (* ... reduces it fully to head normal form *)
+              let stack = st1 @ Stack.append_app_list [mkApp (t_o,args)] st2 in
+              let (c, stack) = whd_opt (t, stack) in (* Isn't it too strong to bypass opacity? Wasn't it just betaiota before? *)
+              Some (EConstr.of_constr (CClosure.term_of_process c stack))
+            | None -> None)
+          | (Some _ | None) -> None
+          end
+        | _ -> None
+      else
+        None
+    with NotEvaluableConst _ ->
+      None)
+  | _ -> None
 (* reduction to head-normal-form allowing delta/zeta only in argument
    of case/fix (heuristic used by evar_conv) *)
 
-let whd_betaiota_deltazeta_for_iota_state ts ?metas env sigma s =
-  let all' = RedFlags.red_add_transparent RedFlags.all ts in
-  (* Unset the sharing flag to get a call-by-name reduction. This matters for
-     the shape of the generated term. *)
+let whd_betaiota_deltazeta_for_iota_state ts ?metas ?(expand=false) env sigma s =
   let env' = Environ.set_typing_flags { (Environ.typing_flags env) with Declarations.share_reduction = false } env in
   let whd_opt c =
+    let all' = RedFlags.red_add_transparent RedFlags.all ts in
+    (* Unset the sharing flag to get a call-by-name reduction. This matters for
+       the shape of the generated term. *)
     let open CClosure in
     let infos = Evarutil.create_clos_infos env' sigma all' in
     let tab = create_tab () in
     let c = inject (EConstr.Unsafe.to_constr (Stack.zip sigma c)) in
-    let (c, stk) = whd_stack infos tab c [] in
+    CClosure.whd_stack infos tab c [] in
+  let whd_betaiota c =
+    let open CClosure in
+    let infos = Evarutil.create_clos_infos env' sigma RedFlags.betaiota in
+    let tab = create_tab () in
+    let c = inject (EConstr.Unsafe.to_constr (Stack.zip sigma c)) in
+    whd_state_gen RedFlags.nored ?metas env sigma (EConstr.of_constr (whd_val infos tab c), []) in
+  let test_constructor (c, stk) =
+    let open CClosure in
     match fterm_of c with
     | (FConstruct _ | FCoFix _) ->
       (* Non-neutral normal, can trigger reduction below *)
@@ -1628,7 +1670,7 @@ let whd_betaiota_deltazeta_for_iota_state ts ?metas env sigma s =
     | _ -> None
   in
   let rec whrec s =
-    let (t, stack as s) = whd_state_gen RedFlags.betaiota ?metas env sigma s in
+    let (t, stack as s) = whd_betaiota s in
     let rewrite_step =
       match kind sigma t with
       | Const (cst, u) when Environ.is_symbol env cst ->
@@ -1643,23 +1685,31 @@ let whd_betaiota_deltazeta_for_iota_state ts ?metas env sigma s =
     | Some r -> whrec r
     | None ->
     match Stack.strip_app stack with
-      |args, (Stack.Case _ :: _ as stack') ->
-        begin match whd_opt (t, args) with
+      | args, (Stack.Case _ :: _ as stack') ->
+        begin match test_constructor (whd_opt (t, args)) with
         | Some (t_o, args) when reducible_mind_case sigma t_o -> whrec (t_o, Stack.append_app args stack')
         | (Some _ | None) -> s
         end
-      |args, (Stack.Fix _ :: _ as stack') ->
-        begin match whd_opt (t, args) with
+      | args, (Stack.Fix _ :: _ as stack') ->
+        begin match test_constructor (whd_opt (t, args)) with
         | Some (t_o, args) when isConstruct sigma t_o -> whrec (t_o, Stack.append_app args stack')
         | (Some _ | None) -> s
         end
-      |args, (Stack.Proj (p,_) :: stack'') ->
-        begin match whd_opt (t, args) with
+      | args, (Stack.Proj (p,_) :: stack'') ->
+        begin match test_constructor (whd_opt (t, args)) with
         | Some (t_o, args) when isConstruct sigma t_o ->
           whrec (args.(Projection.npars p + Projection.arg p), stack'')
         | (Some _ | None) -> s
         end
-      |_, ((Stack.App _|Stack.Primitive _) :: _|[]) -> s
+      | _, ((Stack.App _|Stack.Primitive _) :: _|[]) ->
+        if expand then
+(*let _ = Printf.eprintf "RED %s\n%!"
+(Pp.string_of_ppcmds (Termops.Internal.print_constr_env env sigma (fst s))) in*)
+          match unfold_constant_hiding_global_fix env sigma whd_opt test_constructor s with
+          | Some s -> whrec (s, Stack.empty)
+          | None -> s
+        else
+          s
   in
   whrec s
 

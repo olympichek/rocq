@@ -182,6 +182,10 @@ val fold_right_and_left : ('b -> 'a -> 'a list -> 'b) -> 'a list -> 'b -> 'b
 (** [fold_right_and_left f [a1;...;an] hd] is
     [f (f (... (f (f hd an [an-1;...;a1]) an-1 [an-2;...;a1]) ...) a2 [a1]) a1 []] *)
 
+val fold_right3 : ('a -> 'b -> 'c -> 'd -> 'd) -> 'a list -> 'b list -> 'c list -> 'd -> 'd
+(** Like [List.fold_right] but for 3 lists; raise [Invalid_argument _] if
+    not all lists of the same size *)
+
 val fold_left3 : ('a -> 'b -> 'c -> 'd -> 'a) -> 'a -> 'b list -> 'c list -> 'd list -> 'a
 (** Like [List.fold_left] but for 3 lists; raise [Invalid_argument _] if
     not all lists of the same size *)

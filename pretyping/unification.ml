@@ -798,6 +798,11 @@ type key =
   | IsKey of CClosure.table_key
   | IsProj of Projection.t * ERelevance.t * EConstr.constr
 
+let is_fix c =
+  let _lams, b = Term.decompose_lambda c in
+  let f, l = Constr.decompose_app b in
+  Array.length l = 0 && Constr.isFix f
+
 let expand_table_key ~metas ts env sigma args = function
   | ConstKey (c, u) ->
       if Structures.PrimitiveProjections.is_transparent_constant ts c then
@@ -807,9 +812,10 @@ let expand_table_key ~metas ts env sigma args = function
             that the compatibility constant itself does not count as an unfolding
             (delta) step. *)
         | def ->
-        let def = EConstr.Unsafe.to_constr def in
-        let unf = unfold_projection_under_eta env ts c def in
-        Some (EConstr.of_constr @@ Option.default def unf, args)
+          let def = EConstr.Unsafe.to_constr def in
+          (match unfold_projection_under_eta env ts c def with
+          | Some unf -> Some (false, (EConstr.of_constr unf, args))
+          | None -> Some (is_fix def, (EConstr.of_constr def, args)))
         | exception NotEvaluableConst (IsPrimitive (u, op)) ->
           let nargs = CPrimitives.arity op in
           begin match Array.chop nargs args with
@@ -828,7 +834,7 @@ let expand_table_key ~metas ts env sigma args = function
               Array.map2 red args args_red
             in
             begin match CredNative.(red_prim env sigma op (EInstance.make u) args) with
-              | Some v -> Some (v, appl)
+              | Some v -> Some (false, (v, appl))
               | None -> None
               end
             | exception Failure _ -> None
@@ -838,31 +844,32 @@ let expand_table_key ~metas ts env sigma args = function
           let metas = Meta.meta_handler metas in
           let sk = Stack.( append_app args empty ) in
           let rhs, stack = Reductionops.apply_rules
-            (fun ctx -> whd_betaiota_deltazeta_for_iota_state ts ~metas (push_rel_context ctx env) sigma) env sigma (EInstance.make u) r sk
+            (fun ctx -> whd_betaiota_deltazeta_for_iota_state ts ~metas ~expand:false (push_rel_context ctx env) sigma)
+            env sigma (EInstance.make u) r sk
           in
           let args' = Stack.list_of_app_stack stack
             |> (function Some l -> l | None -> assert false)
             |> Array.of_list in
-          Some (rhs, args')
+          Some (false, (rhs, args'))
         with PatternFailure -> None
         (* TODO: try unfold fix *)
         end
         | exception NotEvaluableConst _ -> None
       else None
-  | VarKey id -> (try named_body id env |> Option.map (fun c -> (EConstr.of_constr c, args)) with Not_found -> None)
+  | VarKey id -> (match named_body id env with Some v -> Some (is_fix v, (EConstr.of_constr v, args)) | None -> None | exception Not_found -> None)
   | RelKey _ -> None
 
 let unfold_projection env p r stk =
-  let s = Stack.Proj (p,r) in
+  let s = Stack.Proj (Projection.unfold p,r) in
   s :: stk
 
 let expand_key ~metas ts env sigma args = function
   | Some (IsKey k) -> (expand_table_key ~metas ts env sigma args k)
   | Some (IsProj (p, r, c)) ->
     let metas = Meta.meta_handler metas in
-    let red = Stack.zip sigma (whd_betaiota_deltazeta_for_iota_state ts ~metas env sigma
+    let red = Stack.zip sigma (whd_betaiota_deltazeta_for_iota_state ts ~metas ~expand:false env sigma
                                (c, unfold_projection env p r []))
-    in if EConstr.eq_constr sigma (EConstr.mkProj (p, r, c)) red then None else Some (red, args)
+    in if EConstr.eq_constr sigma (EConstr.mkProj (p, r, c)) red then None else Some (false, (red, args))
   | None -> None
 
 let isApp_or_Proj sigma c =
@@ -874,13 +881,18 @@ type unirec_flags = {
   at_top: bool;
   with_types: bool;
   with_cs : bool;
+  (* We don't expand constant hiding a fix anymore. Instead we
+     remember when the constant has been "visited", meaning it should
+     behave as an unfolded constant but without being explicitly unfolded *)
+  visited_fix1 : bool;
+  visited_fix2 : bool;
 }
 
 let subterm_restriction opt flags =
   not opt.at_top && flags.restrict_conv_on_strict_subterms
 
-let key_of env sigma b flags f =
-  if subterm_restriction b flags then None else
+let key_of env sigma b flags visited f =
+  if subterm_restriction b flags || visited then None else
   match EConstr.kind sigma f with
   | Const (cst, u) when is_transparent env (Evaluable.EvalConstRef cst) &&
       (Structures.PrimitiveProjections.is_transparent_constant flags.modulo_delta cst
@@ -955,10 +967,10 @@ let constr_cmp pb env sigma flags ?nargs t u =
   | None ->
     None
 
-let do_reduce ~metas ts (env, nb) sigma c =
+let do_reduce ~metas ts (env, nb) sigma expand c =
   let metas = Meta.meta_handler metas in
-  Stack.zip sigma (whd_betaiota_deltazeta_for_iota_state ~metas
-                  ts env sigma (c, Stack.empty))
+  Stack.zip sigma (whd_betaiota_deltazeta_for_iota_state ts ~metas ~expand
+                  env sigma (c, Stack.empty))
 
 let is_evar_allowed sigma flags evk =
   AllowedEvars.mem flags.allowed_evars sigma evk
@@ -1119,6 +1131,13 @@ let rec unify_0_with_initial_metas (subst : subst0) conv_at_top env pb flags m n
           Termops.Internal.print_constr_env curenv sigma cM ++ strbrk" ~= " ++
           Termops.Internal.print_constr_env curenv sigma cN)
     in
+(*
+    let () =
+      Printf.eprintf "%s ~= %s\n%!"
+          (Pp.string_of_ppcmds (Termops.Internal.print_constr_env curenv sigma cM))
+          (Pp.string_of_ppcmds (Termops.Internal.print_constr_env curenv sigma cN))
+    in
+*)
       match (EConstr.kind sigma cM, EConstr.kind sigma cN) with
         | Meta k1, Meta k2 ->
             if Int.equal k1 k2 then substn else
@@ -1290,6 +1309,34 @@ let rec unify_0_with_initial_metas (subst : subst0) conv_at_top env pb flags m n
              with ex when precatchable_exception ex ->
                reduce curenvnb pb opt substn cM cN)
 
+        (* unification does not unfold constant hiding unreducible fix anymore, so we need to
+           address the case of a Fix in the original unification problem explicitly *)
+        | _, Fix ((ln2,i2),(_,tl2,bl2)) when opt.visited_fix1 ->
+            (let f, l = decompose_app sigma cM in
+             match kind sigma f with
+              | Const (cst, u) ->
+                let metas = substn.subst_metam in
+                (match expand_table_key ~metas flags.modulo_delta env sigma l (ConstKey (cst, EInstance.kind sigma u)) with
+                | Some (isfix,c) ->
+                  assert isfix; (* Maybe, we don't need the visited_fix1 check *)
+                  let cM = whd_beta env sigma (mkApp c) in
+                  unirec_rec curenvnb pb {opt with visited_fix1=false} ~nargs:0 substn cM cN
+                | None -> error_cannot_unify curenv sigma (cM,cN))
+              | _ -> assert false (* should be an applied fix *))
+
+        | Fix ((ln1,i1),(lna1,tl1,bl1)), _ when opt.visited_fix2 ->
+            (let f, l = decompose_app sigma cN in
+             match kind sigma f with
+              | Const (cst, u) ->
+                let metas = substn.subst_metam in
+                (match expand_table_key ~metas flags.modulo_delta env sigma l (ConstKey (cst, EInstance.kind sigma u)) with
+                | Some (isfix,c) ->
+                  assert isfix; (* Maybe, we don't need the visited_fix1 check *)
+                  let cN = whd_beta env sigma (mkApp c) in
+                  unirec_rec curenvnb pb {opt with visited_fix2=false} ~nargs:0 substn cM cN
+                | None -> error_cannot_unify curenv sigma (cM,cN))
+              | _ -> assert false (* should be an applied fix *))
+
         | CoFix (i1,(lna1,tl1,bl1)), CoFix (i2,(_,tl2,bl2)) when
                Int.equal i1 i2 ->
             (try
@@ -1383,7 +1430,7 @@ let rec unify_0_with_initial_metas (subst : subst0) conv_at_top env pb flags m n
       in
       let f1, l1 = expand_proj f1 f2 l1 in
       let f2, l2 = expand_proj f2 f1 l2 in
-      let opta = {opt with at_top = true; with_types = false} in
+      let opta = {opt with at_top = true; with_types = false; visited_fix1 = false; visited_fix2 = false} in
       let optf = {opt with at_top = true; with_types = true} in
       let (f1,l1,f2,l2) = adjust_app_array_size f1 l1 f2 l2 in
         if Array.length l1 == 0 then error_cannot_unify (fst curenvnb) sigma (cM,cN)
@@ -1430,13 +1477,21 @@ let rec unify_0_with_initial_metas (subst : subst0) conv_at_top env pb flags m n
     let sigma = substn.subst_sigma in
     let metas = substn.subst_metam in
     if flags.modulo_betaiota && not (subterm_restriction opt flags) then
-      let cM' = do_reduce ~metas flags.modulo_delta curenvnb sigma cM in
+(*
+let _ = Printf.eprintf "DORED %s\n%!"
+(Pp.string_of_ppcmds (Termops.Internal.print_constr_env env sigma cM)) in
+*)
+      let cM' = do_reduce ~metas flags.modulo_delta curenvnb sigma opt.visited_fix1 cM in
+(*
+let _ = Printf.eprintf "DORED2 %s\n%!"
+(Pp.string_of_ppcmds (Termops.Internal.print_constr_env env sigma cM')) in
+*)
         if not (EConstr.eq_constr sigma cM cM') then
-          unirec_rec curenvnb pb opt substn cM' cN
+          unirec_rec curenvnb pb {opt with visited_fix1 = false} substn cM' cN
         else
-          let cN' = do_reduce ~metas flags.modulo_delta curenvnb sigma cN in
+          let cN' = do_reduce ~metas flags.modulo_delta curenvnb sigma opt.visited_fix2 cN in
             if not (EConstr.eq_constr sigma cN cN') then
-              unirec_rec curenvnb pb opt substn cM cN'
+              unirec_rec curenvnb pb {opt with visited_fix2 = false} substn cM cN'
             else error_cannot_unify (fst curenvnb) sigma (cM,cN)
     else error_cannot_unify (fst curenvnb) sigma (cM,cN)
 
@@ -1486,39 +1541,64 @@ let rec unify_0_with_initial_metas (subst : subst0) conv_at_top env pb flags m n
             error_cannot_unify curenv sigma (cM,cN)
           else None
     in
+    let whd_betaiotazeta ~metas env sigma ~force c =
+      (* TODO: what to do with metas? *)
+      let open CClosure in
+      let infos = Evarutil.create_clos_infos env sigma RedFlags.betaiotazeta ~force in
+      let tab = create_tab () in
+      let c = inject (EConstr.Unsafe.to_constr c) in
+      EConstr.of_constr (whd_val infos tab c)
+    in
       match res with
       | Some substn -> substn
       | None ->
       let metas = substn.subst_metam in
-      let cf1 = key_of curenv sigma opt flags f1 and cf2 = key_of curenv sigma opt flags f2 in
+      let cf1 = key_of curenv sigma opt flags opt.visited_fix1 f1 and cf2 = key_of curenv sigma opt flags opt.visited_fix2 f2 in
         match oracle_order curenv cf1 cf2 with
         | None -> error_cannot_unify curenv sigma (cM,cN)
         | Some true ->
             (match expand_key ~metas flags.modulo_delta curenv sigma l1 cf1 with
-            | Some c_l1 ->
+            | Some (isfix, c_l1) ->
               let metas = Meta.meta_handler metas in
-                unirec_rec curenvnb pb opt substn
-                  (whd_betaiotazeta ~metas curenv sigma (mkApp c_l1)) cN
+                let cM' = if isfix && flags.modulo_betaiota then mkApp (f1,l1) else mkApp c_l1 in
+                let cM'' = whd_betaiotazeta ~metas curenv sigma ~force:isfix cM' in
+                let progress = EConstr.eq_constr sigma cM' cM'' in
+                let cM, opt =
+                  if isfix && flags.modulo_betaiota && progress then cM, {opt with visited_fix1 = true}
+                  else cM'', opt in
+                unirec_rec curenvnb pb opt substn cM cN
             | None ->
                 (match expand_key ~metas flags.modulo_delta curenv sigma l2 cf2 with
-                | Some c_l2 ->
+                | Some (isfix, c_l2) ->
                   let metas = Meta.meta_handler metas in
-                    unirec_rec curenvnb pb opt substn cM
-                      (whd_betaiotazeta ~metas curenv sigma (mkApp c_l2))
+                  let cN' = if isfix && flags.modulo_betaiota then mkApp (f2,l2) else mkApp c_l2 in
+                  let cN'' = whd_betaiotazeta ~metas curenv sigma ~force:isfix cN' in
+                  let cN, opt =
+                    if isfix && flags.modulo_betaiota && EConstr.eq_constr sigma cN' cN'' then cN, {opt with visited_fix2 = true}
+                    else cN'', opt in
+                  unirec_rec curenvnb pb opt substn cM cN
                 | None ->
                     error_cannot_unify curenv sigma (cM,cN)))
         | Some false ->
             (match expand_key ~metas flags.modulo_delta curenv sigma l2 cf2 with
-            | Some c_l2 ->
+            | Some (isfix, c_l2) ->
               let metas = Meta.meta_handler metas in
-                unirec_rec curenvnb pb opt substn cM
-                  (whd_betaiotazeta ~metas curenv sigma (mkApp c_l2))
+                let cN' = if isfix && flags.modulo_betaiota then mkApp (f2,l2) else mkApp c_l2 in
+                let cN'' = whd_betaiotazeta ~metas curenv sigma ~force:isfix cN' in
+                let cN, opt =
+                  if isfix && flags.modulo_betaiota && EConstr.eq_constr sigma cN' cN'' then cN, {opt with visited_fix2 = true}
+                  else cN'', opt in
+                unirec_rec curenvnb pb opt substn cM cN
             | None ->
                 (match expand_key ~metas flags.modulo_delta curenv sigma l1 cf1 with
-                | Some c_l1 ->
+                | Some (isfix, c_l1) ->
                   let metas = Meta.meta_handler metas in
-                    unirec_rec curenvnb pb opt substn
-                      (whd_betaiotazeta ~metas curenv sigma (mkApp c_l1)) cN
+                  let cM' = if isfix && flags.modulo_betaiota then mkApp (f1,l1) else mkApp c_l1 in
+                  let cM'' = whd_betaiotazeta ~metas curenv sigma ~force:isfix cM' in
+                  let cM, opt =
+                    if isfix && flags.modulo_betaiota && EConstr.eq_constr sigma cM' cM'' then cM, {opt with visited_fix1 = true}
+                    else cM'', opt in
+                    unirec_rec curenvnb pb opt substn cM cN
                 | None ->
                     error_cannot_unify curenv sigma (cM,cN)))
 
@@ -1604,7 +1684,7 @@ let rec unify_0_with_initial_metas (subst : subst0) conv_at_top env pb flags m n
       Termops.Internal.print_constr_env env sigma (fst m) ++ strbrk" ~= " ++
       Termops.Internal.print_constr_env env sigma (fst n));
 
-  let opt = { at_top = conv_at_top; with_types = false; with_cs = true } in
+  let opt = { at_top = conv_at_top; with_types = false; with_cs = true; visited_fix1 = false; visited_fix2 = false } in
   try
   let res =
     if subterm_restriction opt flags ||

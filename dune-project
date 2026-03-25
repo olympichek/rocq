@@ -19,7 +19,7 @@
 (source (github rocq-prover/rocq))
 (homepage https://rocq-prover.org/)
 (documentation "https://rocq-prover.org/docs/")
-(version dev)
+(version 9.1.0+ppedrot-global-fix-conversion)
 
 ; Note that we use rocq-runtime.opam.template to have dune add the correct opam
 ; prefix for configure

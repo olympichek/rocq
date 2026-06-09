@@ -1638,11 +1638,14 @@ let whd_betaiota_deltazeta_for_iota_state ts ?metas ?(expand=false) env sigma s 
     let c = inject (EConstr.Unsafe.to_constr (Stack.zip sigma c)) in
     CClosure.whd_stack infos tab c [] in
   let whd_betaiota c =
-    let open CClosure in
-    let infos = Evarutil.create_clos_infos env' sigma RedFlags.betaiota in
-    let tab = create_tab () in
-    let c = inject (EConstr.Unsafe.to_constr (Stack.zip sigma c)) in
-    whd_state_gen RedFlags.nored ?metas env sigma (EConstr.of_constr (whd_val infos tab c), []) in
+    let ec = Stack.zip sigma c in
+    if occur_existential sigma ec then whd_state_gen RedFlags.betaiota ?metas env sigma c
+    else
+      let open CClosure in
+      let infos = Evarutil.create_clos_infos env' sigma RedFlags.betaiota in
+      let tab = create_tab () in
+      let c = inject (EConstr.Unsafe.to_constr ec) in
+      whd_state_gen RedFlags.nored ?metas env sigma (EConstr.of_constr (whd_val infos tab c), []) in
   let test_constructor (c, stk) =
     let open CClosure in
     match fterm_of c with

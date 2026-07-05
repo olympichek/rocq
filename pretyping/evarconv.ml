@@ -109,7 +109,23 @@ let eval_flexible_term ts env evd c sk =
                that the compatibility constant itself does not count as an unfolding
                (delta) step. *)
             let unf = unfold_projection_under_eta env evd ts c def in
-            Some (Option.default def unf, sk)
+            (match unf with
+            | Some def -> Some (def, sk)
+            | None ->
+              let _, body = decompose_lambda evd def in
+              let hd, args = decompose_app evd body in
+              if Array.is_empty args && isFix evd hd then
+                (* The constant hides a global fixpoint: reduce without
+                   exposing the fix, refolding recursive occurrences. *)
+                let (t', _ as s') =
+                  whd_betaiota_deltazeta_for_iota_state ts ~expand:true env evd
+                    (mkConstU (c, u), sk) in
+                (match EConstr.kind evd t' with
+                | Const (c', _) when Constant.CanOrd.equal c c' ->
+                  (* the underlying fix is not reducible; expose it as before *)
+                  Some (def, sk)
+                | _ -> Some s')
+              else Some (def, sk))
         | Primitive op ->
           let nargs = CPrimitives.arity op in
           let (args, rest_sk) = Stack.strip_app sk in

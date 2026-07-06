@@ -1179,16 +1179,24 @@ let whnf_nodelta_shortcut x =
   in
   is_whnf (EConstr.Unsafe.to_constr x)
 
+let unshare_env env =
+  (* Unset the sharing flag to get a call-by-name reduction, as performed by
+     the engine machine of [whd_state_gen]. This matters for the shape of the
+     generated term: with call-by-need, copies of a subterm shared with the
+     head would come out reduced too. *)
+  Environ.set_typing_flags
+    { (Environ.typing_flags env) with Declarations.share_reduction = false } env
+
 let whd_all ?metas env sigma x =
   match metas with
   | Some _ -> red_of_state_red ?metas ~delta:true whd_all_state env sigma x
   | None ->
     if whnf_nodelta_shortcut x then x
-    else clos_whd_flags RedFlags.all env sigma x
+    else clos_whd_flags RedFlags.all (unshare_env env) sigma x
 
 let whd_allnolet env sigma x =
   if whnf_nodelta_shortcut x then x
-  else clos_whd_flags RedFlags.allnolet env sigma x
+  else clos_whd_flags RedFlags.allnolet (unshare_env env) sigma x
 
 let nf_beta = clos_norm_flags RedFlags.beta
 let nf_betaiota = clos_norm_flags RedFlags.betaiota

@@ -19,7 +19,7 @@
 (source (github rocq-prover/rocq))
 (homepage https://rocq-prover.org/)
 (documentation "https://rocq-prover.org/docs/")
-(version dev)
+(version 9.2.0+bonak-patches)
 (maintenance_intent "(any)")
 
 ; Note that we use rocq-runtime.opam.template to have dune add the correct opam

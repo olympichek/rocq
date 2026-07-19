@@ -44,9 +44,14 @@ val general_setoid_rewrite_clause :
   (Id.t option -> orientation -> occurrences -> constr with_bindings ->
    new_goals:constr list -> unit Proofview.tactic) Hook.t
 
+(* When [bfs] is set (default [false]), the occurrence used to instantiate the
+   rewriting lemma is chosen by a breadth-first (shallowest-first) search of the
+   goal instead of the default depth-first outermost-leftmost order. This only
+   affects lemmas whose left-hand side is a pattern matching at several depths;
+   it implements the [rewrite_bfs] tactic. *)
 val general_rewrite : where:Id.t option ->
   l2r:orientation -> occurrences -> freeze:freeze_evars_flag -> dep:dep_proof_flag -> with_evars:evars_flag ->
-  ?tac:(unit Proofview.tactic * conditions) -> constr with_bindings -> unit Proofview.tactic
+  ?bfs:bool -> ?tac:(unit Proofview.tactic * conditions) -> constr with_bindings -> unit Proofview.tactic
 
 type multi =
   | Precisely of int

@@ -2599,6 +2599,73 @@ let w_unify_to_subterm_all ~metas env evd ?(flags=default_unify_flags ()) (op,cl
   | _ ->
     List.map fst res
 
+(* Breadth-first, single-match variant of [w_unify_to_subterm]: enumerates the
+   subterms shallowest-first (closest to the root) and returns the first
+   (shallowest, then left-to-right) match, stopping immediately. Like
+   [w_unify_to_subterm] it uses the fast type-shape head check ([fast_head_check]
+   / [keyed_unify]) to skip subterms that cannot match without a real
+   unification attempt; and -- crucially for performance -- because it stops at
+   the shallowest match it never dequeues deeper subterms, so it does not
+   traverse (nor attempt to unify against) the large implicit arguments buried
+   below a shallow occurrence. Used by [rewrite_bfs]. *)
+let w_bfs_unify_to_subterm ~metas env evd ?(flags=default_unify_flags ()) (op,cl) =
+  let bestexn = ref None in
+  let kop = Keys.constr_key env (fun c -> EConstr.kind evd c) op in
+  let opgnd = if occur_meta_or_undefined_evar evd op then NotGround else Ground in
+  let knd = get_head_kind ~metas env evd op in
+  let test cl =
+    if closed0 evd cl && not (isEvar evd cl)
+       && keyed_unify env evd kop cl && fast_head_check evd knd cl then
+      try
+        if is_keyed_unification () then
+          let f1, l1 = decompose_app evd op in
+          let f2, l2 = decompose_app evd cl in
+          Some (w_typed_unify_array ~metas env evd flags f1 l1 f2 l2, cl)
+        else
+          Some (w_typed_unify ~metas env evd CONV flags (op, opgnd) (cl, Unknown), cl)
+      with ex when precatchable_exception ex ->
+        let () = if Pretype_errors.unsatisfiable_exception ex then bestexn := Some ex in
+        None
+    else None
+  in
+  let children cl = match EConstr.kind evd cl with
+    | App (f,args) ->
+      let n = Array.length args in
+      (match knd with
+       | HeadInd | HeadSort ->
+         (* an application cannot match an inductive/sort-headed pattern, so
+            only the head and the arguments are candidate subterms *)
+         f :: Array.to_list args
+       | HeadProd | HeadOther ->
+         (* mirror the currying decomposition of [w_unify_to_subterm] so that
+            partial applications are candidate subterms too *)
+         [mkApp (f, Array.sub args 0 (n-1)); args.(n-1)])
+    | Case (_,_,_,_,_,c,lf) -> (* does not search in the predicate *)
+      c :: Array.to_list (Array.map snd lf)
+    | Proj (_,_,c) -> [c]
+    | LetIn (_,c1,_,c2) -> [c1; c2]
+    | Fix (_,(_,types,terms)) | CoFix (_,(_,types,terms)) ->
+      Array.to_list types @ Array.to_list terms
+    | Prod (_,t,c) | Lambda (_,t,c) -> [t; c]
+    | Array (_u,t,def,ty) -> Array.to_list t @ [def; ty]
+    | Cast _ | Rel _ | Var _ | Meta _ | Evar _ | Sort _ | Const _ | Ind _
+    | Construct _ | Int _ | Float _ | String _ -> []
+  in
+  let q = Queue.create () in
+  Queue.add cl q;
+  let rec loop () = match Queue.take q with
+    | exception Queue.Empty ->
+      (match !bestexn with
+       | None -> raise (PretypeError (env,evd,NoOccurrenceFound (op, None)))
+       | Some e -> raise e)
+    | cl ->
+      let cl = strip_outer_cast evd cl in
+      (match test cl with
+       | Some ans -> ans
+       | None -> List.iter (fun sub -> Queue.add sub q) (children cl); loop ())
+  in
+  loop ()
+
 let w_unify_to_subterm_list ~metas env evd flags hdmeta oplist t =
   List.fold_right
     (fun op (metas,evd,l) ->
@@ -2751,6 +2818,9 @@ let w_unify_to_subterm ?(metas = Metamap.empty) env evd ?where ?flags arg =
 
 let w_unify_to_subterm_all ?(metas = Metamap.empty) env evd ?flags arg =
   w_unify_to_subterm_all ~metas env evd ?flags arg
+
+let w_bfs_unify_to_subterm ?(metas = Metamap.empty) env evd ?flags arg =
+  w_bfs_unify_to_subterm ~metas env evd ?flags arg
 
 let w_unify_meta_types ?(metas = Metamap.empty) env ?flags evd =
   w_unify_meta_types ~metas env ?flags evd

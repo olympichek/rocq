@@ -216,6 +216,25 @@ TACTIC EXTEND rewrite_star
     END
 
 (**********************************************************************)
+(* Breadth-first rewrite                                              *)
+
+{
+
+let rewrite_bfs ist clause orient c =
+  Internals.with_delayed_uconstr ist c
+    (fun c -> general_rewrite ~where:clause ~l2r:orient Locus.AllOccurrences
+                ~freeze:true ~dep:true ~with_evars:false ~bfs:true (c, NoBindings))
+
+}
+
+TACTIC EXTEND rewrite_bfs
+| [ "rewrite_bfs" orient(o) uconstr(c) ] ->
+    { rewrite_bfs ist None o c }
+| [ "rewrite_bfs" orient(o) uconstr(c) "in" hyp(id) ] ->
+    { rewrite_bfs ist (Some id) o c }
+END
+
+(**********************************************************************)
 (* Hint Rewrite                                                       *)
 
 {

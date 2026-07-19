@@ -114,6 +114,15 @@ val w_unify_to_subterm_all :
   ?metas:Meta.t ->
   env -> evar_map -> ?flags:unify_flags -> constr * constr -> (Meta.t * evar_map) list
 
+(** Like [w_unify_to_subterm] (single match, early stopping, head-gated), but
+    enumerates the subterms in breadth-first (shallowest-first) order rather than
+    depth-first pre-order, returning the shallowest match. Because it stops at
+    the first match it does not traverse subterms below it. Used to implement the
+    [rewrite_bfs] tactic. *)
+val w_bfs_unify_to_subterm :
+  ?metas:Meta.t ->
+  env -> evar_map -> ?flags:unify_flags -> constr * constr -> (Meta.t * evar_map) * constr
+
 val w_unify_meta_types :
   ?metas:Meta.t ->
   env -> ?flags:unify_flags -> evar_map -> Meta.t * evar_map

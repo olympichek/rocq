@@ -127,15 +127,21 @@ let side_tac tac sidetac =
   | None -> tac
   | Some sidetac -> tclTHENSFIRSTn tac [|Proofview.tclUNIT ()|] sidetac
 
-let instantiate_lemma_all env flags eqclause l2r concl =
+let instantiate_lemma_all bfs env flags eqclause l2r concl =
   let (_, args) = decompose_app (Clenv.clenv_evd eqclause) (Clenv.clenv_type eqclause) in
   let arglen = Array.length args in
   let () = if arglen < 2 then user_err Pp.(str "The term provided is not an applied relation.") in
   let c1 = args.(arglen - 2) in
   let c2 = args.(arglen - 1) in
   let metas = Clenv.clenv_meta_list eqclause in
-  w_unify_to_subterm_all ~metas ~flags env (Clenv.clenv_evd eqclause)
-    ((if l2r then c1 else c2),concl)
+  let arg = ((if l2r then c1 else c2), concl) in
+  if bfs then
+    (* Breadth-first: commit to the single shallowest match (see
+       [w_bfs_unify_to_subterm]); return it as a one-element candidate list. *)
+    let (r, _) = w_bfs_unify_to_subterm ~metas ~flags env (Clenv.clenv_evd eqclause) arg in
+    [r]
+  else
+    w_unify_to_subterm_all ~metas ~flags env (Clenv.clenv_evd eqclause) arg
 
 let rewrite_conv_closed_core_unif_flags = {
   modulo_conv_on_closed_terms = Some TransparentState.full;
@@ -247,7 +253,7 @@ let elim_wrapper cls rwtac =
       Proofview.tclZERO ~info e
     end
 
-let general_elim_clause with_evars frzevars tac cls c (ctx, eqn, args) l l2r elim indargs =
+let general_elim_clause ?(bfs=false) with_evars frzevars tac cls c (ctx, eqn, args) l l2r elim indargs =
   (* Ad hoc asymmetric general_elim_clause *)
   let general_elim_clause0 rew =
     let rewrite_elim =
@@ -268,10 +274,15 @@ let general_elim_clause with_evars frzevars tac cls c (ctx, eqn, args) l l2r eli
     Proofview.Unsafe.tclEVARS (Clenv.clenv_evd rew) <*>
     elim_wrapper cls rewrite_elim
   in
+  (* [rewrite_bfs] reuses the [FirstSolved] machinery (find candidate
+     instantiations, then eliminate with the first one), but the breadth-first
+     finder commits to the single shallowest match instead of the depth-first
+     outermost-leftmost one -- and, crucially, stops there without traversing
+     deeper subterms. See [instantiate_lemma_all]. *)
   let strat, tac =
     match tac with
-    | None -> Naive, None
-    | Some (tac, Naive) -> Naive, Some tac
+    | None -> (if bfs then FirstSolved else Naive), None
+    | Some (tac, Naive) -> (if bfs then FirstSolved else Naive), Some tac
     | Some (tac, FirstSolved) -> FirstSolved, Some (tclCOMPLETE tac)
     | Some (tac, AllMatches) -> AllMatches, Some (tclCOMPLETE tac)
   in
@@ -294,12 +305,22 @@ let general_elim_clause with_evars frzevars tac cls c (ctx, eqn, args) l l2r eli
     | Naive ->
       side_tac (general_elim_clause0 eqclause) tac
     | FirstSolved ->
-      let flags = make_flags frzevars sigma rewrite_unif_flags (lazy Evar.Set.empty) in
-      let cs = instantiate_lemma_all env flags eqclause l2r typ in
+      (* [rewrite_bfs] reaches this branch too, but unlike conditional rewriting
+         it must find the occurrence up to conversion, exactly like the [Naive]
+         path does. Use the same conversion-permissive flags in that case rather
+         than the (nearly syntactic) [rewrite_unif_flags]. *)
+      let unif_flags =
+        if bfs then
+          (if Unification.is_keyed_unification ()
+           then rewrite_keyed_unif_flags else rewrite_conv_closed_unif_flags)
+        else rewrite_unif_flags
+      in
+      let flags = make_flags frzevars sigma unif_flags (lazy Evar.Set.empty) in
+      let cs = instantiate_lemma_all bfs env flags eqclause l2r typ in
       tclFIRST (List.map try_clause cs)
     | AllMatches ->
       let flags = make_flags frzevars sigma rewrite_unif_flags (lazy Evar.Set.empty) in
-      let cs = instantiate_lemma_all env flags eqclause l2r typ in
+      let cs = instantiate_lemma_all bfs env flags eqclause l2r typ in
       tclMAP (fun x -> tclTRY (try_clause x)) cs
   end
 
@@ -534,7 +555,7 @@ let find_elim lft2rgt dep inccl type_of_cls (ctx, hdcncl, args) =
     gen_elim ()
   end
 
-let leibniz_rewrite_ebindings_clause cls lft2rgt tac c ((_, hdcncl, _) as t) l with_evars frzevars dep_proof_ok =
+let leibniz_rewrite_ebindings_clause ?(bfs=false) cls lft2rgt tac c ((_, hdcncl, _) as t) l with_evars frzevars dep_proof_ok =
   Proofview.Goal.enter begin fun gl ->
   let evd = Proofview.Goal.sigma gl in
   let type_of_cls = match cls with
@@ -543,7 +564,7 @@ let leibniz_rewrite_ebindings_clause cls lft2rgt tac c ((_, hdcncl, _) as t) l w
   let dep = dep_proof_ok && dependent_no_evar evd c type_of_cls in
   let inccl = Option.is_empty cls in
   find_elim lft2rgt dep inccl type_of_cls t >>= fun (elim, indarg, warn) ->
-      general_elim_clause with_evars frzevars tac cls c t l
+      general_elim_clause ~bfs with_evars frzevars tac cls c t l
         lft2rgt elim indarg >>= fun () ->
       warn_missing_scheme warn
   end
@@ -564,7 +585,7 @@ let rewrite_side_tac tac sidetac = side_tac tac (Option.map fst sidetac)
 
 (* Main function for dispatching which kind of rewriting it is about *)
 
-let general_rewrite ~where:cls ~l2r:lft2rgt occs ~freeze:frzevars ~dep:dep_proof_ok ~with_evars ?tac
+let general_rewrite ~where:cls ~l2r:lft2rgt occs ~freeze:frzevars ~dep:dep_proof_ok ~with_evars ?(bfs=false) ?tac
     ((c,l) : constr with_bindings) =
   if not (Locusops.is_all_occurrences occs) then (
     rewrite_side_tac (Hook.get forward_general_setoid_rewrite_clause cls lft2rgt occs (c,l) ~new_goals:[]) tac)
@@ -577,7 +598,7 @@ let general_rewrite ~where:cls ~l2r:lft2rgt occs ~freeze:frzevars ~dep:dep_proof
       match match_with_equality_type env sigma t with
       | Some (hdcncl,args) -> (* Fast path: direct leibniz-like rewrite *)
           let lft2rgt = adjust_rewriting_direction args lft2rgt in
-          leibniz_rewrite_ebindings_clause cls lft2rgt tac c (rels, hdcncl, args)
+          leibniz_rewrite_ebindings_clause ~bfs cls lft2rgt tac c (rels, hdcncl, args)
             l with_evars frzevars dep_proof_ok
       | None ->
           Proofview.tclORELSE
@@ -593,7 +614,7 @@ let general_rewrite ~where:cls ~l2r:lft2rgt occs ~freeze:frzevars ~dep:dep_proof
                   match match_with_equality_type env' sigma t' with
                     | Some (hdcncl,args) ->
                   let lft2rgt = adjust_rewriting_direction args lft2rgt in
-                  leibniz_rewrite_ebindings_clause cls lft2rgt tac c
+                  leibniz_rewrite_ebindings_clause ~bfs cls lft2rgt tac c
                     (rels' @ rels, hdcncl, args) l with_evars frzevars dep_proof_ok
                     | None -> Proofview.tclZERO ~info e
             (* error "The provided term does not end with an equality or a declared rewrite relation." *)

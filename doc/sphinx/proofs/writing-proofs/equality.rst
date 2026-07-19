@@ -260,6 +260,29 @@ Rewriting with Leibniz and setoid equality
    :name: rewrite *; _
    :undocumented:
 
+.. tacn:: rewrite_bfs {? {| -> | <- } } @one_term {? in @ident }
+
+   Behaves like :tacn:`rewrite`, except that the occurrence used to instantiate
+   the left-hand side of :n:`@one_term` is selected by a breadth-first
+   (shallowest-first) traversal of the goal, rather than the default depth-first
+   outermost-leftmost order. The search stops at the first (shallowest, then
+   left-to-right) match and commits to it; once that instantiation is selected,
+   all occurrences of that instance are rewritten, exactly as with
+   :tacn:`rewrite`.
+
+   This only changes *which* occurrence is picked for lemmas whose left-hand
+   side is a pattern (that is, containing universally quantified variables) that
+   matches subterms at several depths. For a ground left-hand side,
+   :tacn:`rewrite_bfs` is equivalent to :tacn:`rewrite`.
+
+   Because it stops at the shallowest match, :tacn:`rewrite_bfs` never descends
+   into subterms below that match. This can be significantly faster than
+   :tacn:`rewrite` when a shallow target occurrence sits next to deep subterms
+   that share the left-hand side's head symbol and are expensive to reject
+   (for instance large implicit arguments): the depth-first search of
+   :tacn:`rewrite` attempts, and rejects, those deep occurrences first, whereas
+   :tacn:`rewrite_bfs` finds the shallow occurrence and never traverses them.
+
 .. tacn:: replace {? {| -> | <- } } @one_term__from with @one_term__to {? @occurrences } {? by @ltac_expr3 }
           replace {? {| -> | <- } } @one_term__from {? @occurrences }
    :name: replace; _

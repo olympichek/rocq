@@ -492,12 +492,18 @@ let cc_max_size =
   | n -> n
   | exception _ -> max_int
 
-(* The cache is enabled by default; set ROCQ_CONV_CACHE=0 to disable. *)
-let cc_enabled =
-  match Sys.getenv "ROCQ_CONV_CACHE" with
-  | "0" -> false
-  | _ -> true
-  | exception Not_found -> true
+(* The conversion cache is off by default and enabled by the vernacular
+   [Set Conversion Cache] (see [set_conv_cache] below). The environment
+   variable ROCQ_CONV_CACHE=1 sets the initial value, so a whole build can
+   opt in without editing sources. *)
+let conv_cache_flag =
+  ref (match Sys.getenv "ROCQ_CONV_CACHE" with
+       | "1" -> true
+       | _ -> false
+       | exception Not_found -> false)
+
+let set_conv_cache b = conv_cache_flag := b
+let get_conv_cache () = !conv_cache_flag
 
 (* Conversion between  [lft1]term1 and [lft2]term2 *)
 let rec ccnv cv_pb l2r infos lft1 lft2 term1 term2 cuniv =
@@ -1123,7 +1129,7 @@ let clos_gen_conv (type err) ~typed ~use_cache trans cv_pb l2r evars env graph u
       let module Error = struct type payload += Error of err end in
       let box e = Error.Error e in
       let cache =
-        if use_cache && cc_enabled then
+        if use_cache && !conv_cache_flag then
           Some { cc_key = Array.make 256 0; cc_meta = Array.make 256 0;
                  cc_cnt = 0; cc_lifts = LiftTbl.create 16; cc_nlifts = 0 }
         else None

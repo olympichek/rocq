@@ -2023,6 +2023,14 @@ let () =
   declare_bool_option
     { optstage = Summary.Stage.Interp;
       optdepr  = None;
+      optkey   = ["Conversion"; "Cache"];
+      optread  = Conversion.get_conv_cache;
+      optwrite = Conversion.set_conv_cache }
+
+let () =
+  declare_bool_option
+    { optstage = Summary.Stage.Interp;
+      optdepr  = None;
       optkey   = ["Positivity"; "Checking"];
       optread  = (fun () -> (Global.typing_flags ()).Declarations.check_positive);
       optwrite = (fun b -> Global.set_check_positive b) }

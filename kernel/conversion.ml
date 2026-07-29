@@ -197,12 +197,25 @@ let convert_inductives_gen cmp_instances cmp_cumul cv_pb (mind,ind) nargs u1 u2 
 (* Conversion result cache. Within one conversion session the same pair of
    cells is typically compared many times over, because beta-substitution
    shares payload cells across all the occurrences of a variable. Entries
-   record the outcome (success or failure) for a pair of cells, identified
-   by their stable ids, at a given lift pair and conversion problem. Only
-   sound for checked conversion, where results are deterministic and no
-   universe constraints are accumulated. *)
+   record the outcome (success or failure) for a pair of cells at a given
+   lift pair and conversion problem. Only sound for checked conversion,
+   where results are deterministic and no universe constraints are
+   accumulated.
+
+   The cells themselves are the keys, held weakly through a two-key
+   ephemeron table, so an entry is dropped once either of its cells is
+   collected. Physical equality still has to be hashed, and [fid] is the
+   only stable hashable proxy for it, so the field stays. *)
+module FconstrKey = struct
+  type t = CClosure.fconstr
+  let equal = (==)
+  let hash = CClosure.get_fid
+end
+
+module CCTbl = Ephemeron.K2.Make(FconstrKey)(FconstrKey)
+
 type conv_cache = {
-  cc_tbl : (int * int * int, (lift * lift * bool) list ref) Hashtbl.t;
+  cc_tbl : (lift * lift * int * bool) list ref CCTbl.t;
   mutable cc_size : int;
 }
 
@@ -446,15 +459,16 @@ let rec ccnv cv_pb l2r infos lft1 lft2 term1 term2 cuniv =
       let l1 = el_shft k1 lft1 in
       let l2 = el_shft k2 lft2 in
       let pb = match cv_pb with CONV -> 0 | CUMUL -> 1 in
-      let key = (CClosure.get_fid v1, CClosure.get_fid v2, pb) in
-      let bucket = Hashtbl.find_opt cache.cc_tbl key in
+      let key = (v1, v2) in
+      let bucket = CCTbl.find_opt cache.cc_tbl key in
       let cached = match bucket with
       | None -> None
       | Some entries ->
         let rec find = function
         | [] -> None
-        | (l1', l2', r) :: rest ->
-          if eq_lift l1' l1 && eq_lift l2' l2 then Some r else find rest
+        | (l1', l2', pb', r) :: rest ->
+          if Int.equal pb' pb && eq_lift l1' l1 && eq_lift l2' l2 then Some r
+          else find rest
         in
         find !entries
       in
@@ -466,8 +480,8 @@ let rec ccnv cv_pb l2r infos lft1 lft2 term1 term2 cuniv =
           if cache.cc_size < cc_max_size then begin
             cache.cc_size <- cache.cc_size + 1;
             match bucket with
-            | Some entries -> entries := (l1, l2, r) :: !entries
-            | None -> Hashtbl.add cache.cc_tbl key (ref [(l1, l2, r)])
+            | Some entries -> entries := (l1, l2, pb, r) :: !entries
+            | None -> CCTbl.add cache.cc_tbl key (ref [(l1, l2, pb, r)])
           end
         in
         match eqappr cv_pb l2r infos (lft1, (term1,[])) (lft2, (term2,[])) cuniv with
@@ -1056,7 +1070,7 @@ let clos_gen_conv (type err) ~typed ~use_cache trans cv_pb l2r evars env graph u
       let box e = Error.Error e in
       let cache =
         if use_cache && cc_enabled then
-          Some { cc_tbl = Hashtbl.create 16; cc_size = 0 }
+          Some { cc_tbl = CCTbl.create 16; cc_size = 0 }
         else None
       in
       let infos = {

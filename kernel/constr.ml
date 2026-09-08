@@ -1360,7 +1360,28 @@ module HCons = GenHCons(struct
      as canonical, and hence hash-consed to themselves *)
 let () = ignore (HCons.hash_term_array rels rels)
 
-let hcons = HCons.hcons
+module HConsMemoTbl = Hashtbl.Make(struct
+  type t = constr
+  let equal a b = a == b
+  let hash c = Hashtbl.hash_param 64 128 c
+end)
+
+let hcons t =
+  (* A shared input graph must be visited by node, not by occurrence. The
+     table is local to this traversal and retains nothing between calls. *)
+  let memo = HConsMemoTbl.create 251 in
+  let module H = GenHCons(struct
+    type t = constr
+    let kind = kind
+    let self x = x
+    let refcount _ = 2
+    let via_hconstr = false
+    module Tbl = struct
+      let find_opt x = HConsMemoTbl.find_opt memo x
+      let add x y = HConsMemoTbl.add memo x y
+    end
+  end) in
+  H.hcons t
 
 (* let hcons_types = hcons_constr *)
 

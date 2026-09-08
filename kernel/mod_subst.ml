@@ -470,8 +470,24 @@ let subst_retro_action subst action =
     let c' = subst_constant subst c in
     if c == c' then action else Register_type(prim, c')
 
-let rec map_kn f f' c =
-  let func = map_kn f f' in
+module SubstTermTbl = Hashtbl.Make(struct
+  type t = constr
+  let equal a b = a == b
+  let hash c = Hashtbl.hash_param 64 128 c
+end)
+
+let map_kn f f' c =
+  (* Module substitution is a fixed, context-independent map. Preserve input
+     DAG sharing instead of independently rebuilding each occurrence. *)
+  let memo = SubstTermTbl.create 251 in
+  let rec map c = match SubstTermTbl.find_opt memo c with
+  | Some c' -> c'
+  | None ->
+    let c' = map_node c in
+    SubstTermTbl.add memo c c';
+    c'
+  and map_node c =
+  let func = map in
     match kind c with
       | Const kn -> (try f' kn with No_subst -> c)
       | Proj (p,r,t) ->
@@ -546,6 +562,8 @@ let rec map_kn f f' c =
             if (bl == bl'&& tl == tl') then c
             else mkCoFix (ln,(lna,tl',bl'))
       | _ -> c
+
+  in map c
 
 let subst_mps subst c =
   let subst_pcon_term subst (con,u) =

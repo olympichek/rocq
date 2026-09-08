@@ -181,9 +181,25 @@ let discharge_proj (_,_,abstr_inst_length) p =
 let is_empty_modlist (cm, mm) =
   Cmap_env.is_empty cm && Mindmap_env.is_empty mm
 
+module CookingTermTbl = Hashtbl.Make(struct
+  type t = int * constr
+  let equal (k, c) (k', c') = k = k' && c == c'
+  let hash (k, c) = Hashtbl.hash (k, Hashtbl.hash_param 64 128 c)
+end)
+
 let expand_constr cache modlist top_abst_subst c =
   let share_univs = share_univs cache top_abst_subst in
+  (* Section expansion depends on binder depth. Preserve shared terms at
+     each depth, with a fresh memo for this fixed expansion environment. *)
+  let memo = CookingTermTbl.create 251 in
   let rec substrec k c =
+    match CookingTermTbl.find_opt memo (k, c) with
+    | Some c' -> c'
+    | None ->
+      let c' = substnode k c in
+      CookingTermTbl.add memo (k, c) c';
+      c'
+  and substnode k c =
     match kind c with
       | Case (ci, u, pms, p, iv, t, br) ->
         begin match share cache top_abst_subst (IndRef ci.ci_ind) modlist with

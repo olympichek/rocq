@@ -501,8 +501,27 @@ let eq_usubs_fast (s1, u1) (s2, u2) =
   (s1 == s2 || (Esubst.is_subs_id s1 && Esubst.is_subs_id s2)) &&
   (u1 == u2 || UVars.Instance.equal u1 u2)
 
+(* The bounded predicate only proves syntactic equality; failure retains the
+   ordinary conversion path. ROCQ_CLOS_ENV=0 disables the shortcut;
+   ROCQ_CLOS_ENV_LATE=0 tries it before cache lookup, including raw subterms. *)
+let clos_env_enabled =
+  Sys.getenv_opt "ROCQ_CLOS_ENV" <> Some "0"
+
+let clos_env_budget =
+  match Sys.getenv_opt "ROCQ_CLOS_ENV_BUDGET" with
+  | Some s ->
+    begin match int_of_string_opt s with
+    | Some n -> max 0 (min 4096 n)
+    | None -> 128
+    end
+  | None -> 128
+
+let clos_env_late = Sys.getenv_opt "ROCQ_CLOS_ENV_LATE" <> Some "0"
+
 let rec compare_under e1 c1 e2 c2 =
-  (c1 == c2 && eq_usubs_fast e1 e2)
+  (c1 == c2 &&
+   (eq_usubs_fast e1 e2 ||
+    (clos_env_enabled && not clos_env_late && CClosure.equal_usubs_bounded ~fuel:clos_env_budget e1 e2)))
   ||
   match Constr.kind c1, Constr.kind c2 with
   | Cast (c1, _, _), _ -> compare_under e1 c1 e2 c2
@@ -592,6 +611,19 @@ let rec fast_test lft1 term1 lft2 term2 = match fterm_of term1, fterm_of term2 w
     compare_under (e1, u1) c1 (e2, u2) c2
   | _ -> false
 
+(* Try the bounded environment predicate only after existing cache misses,
+   and only on a common complete closure body. No subterm traversal. *)
+let rec same_closure_env lft1 term1 lft2 term2 =
+  match fterm_of term1, fterm_of term2 with
+  | FLIFT (i, term1), (FLIFT _ | FCLOS _) ->
+    same_closure_env (el_shft i lft1) term1 lft2 term2
+  | FCLOS _, FLIFT (j, term2) ->
+    same_closure_env lft1 term1 (el_shft j lft2) term2
+  | FCLOS (c1, e1), FCLOS (c2, e2) ->
+    c1 == c2 && eq_lift lft1 lft2 &&
+    CClosure.equal_usubs_bounded ~fuel:clos_env_budget e1 e2
+  | _ -> false
+
 let assert_reduced_constructor s =
   if not @@ CList.is_empty s then
     CErrors.anomaly Pp.(str "conversion was given unreduced term (FConstruct).")
@@ -626,7 +658,7 @@ let rec ccnv ~cache:docache cv_pb l2r infos lft1 lft2 term1 term2 cuniv =
        away by the fallback); do not re-add without a failure cache. *)
     match infos.cnv_cache with
     | None ->
-      eqappr cv_pb l2r infos (lft1, (term1,[])) (lft2, (term2,[])) cuniv
+      eqappr_or_env cv_pb l2r infos lft1 lft2 term1 term2 cuniv
     | Some cache ->
       let (k1, v1) = strip_flift 0 term1 in
       let (k2, v2) = strip_flift 0 term2 in
@@ -650,13 +682,13 @@ let rec ccnv ~cache:docache cv_pb l2r infos lft1 lft2 term1 term2 cuniv =
       in
       if not usefid && not useclos then
         (* neither level can hit: run uncached and assign no ids *)
-        eqappr cv_pb l2r infos (lft1, (term1,[])) (lft2, (term2,[])) cuniv
+        eqappr_or_env cv_pb l2r infos lft1 lft2 term1 term2 cuniv
       else
       let lid1 = cc_intern cache (el_shft k1 lft1) in
       let lid2 = if lid1 < 0 then -1 else cc_intern cache (el_shft k2 lft2) in
       if lid2 < 0 then
         (* out of lift interning range: run uncached *)
-        eqappr cv_pb l2r infos (lft1, (term1,[])) (lft2, (term2,[])) cuniv
+        eqappr_or_env cv_pb l2r infos lft1 lft2 term1 term2 cuniv
       else begin
         let fid1 = if usefid then CClosure.get_fid v1 else 0 in
         let fid2 = if usefid then CClosure.get_fid v2 else 0 in
@@ -722,11 +754,15 @@ let rec ccnv ~cache:docache cv_pb l2r infos lft1 lft2 term1 term2 cuniv =
             in
             (* NOTE: a post-whd second cache probe on the reduced bare states
                was tried here and measured useless (2 hits in 13.2M probes). *)
-            match eqappr cv_pb l2r infos (lft1, (term1,[])) (lft2, (term2,[])) cuniv with
+            match eqappr_or_env cv_pb l2r infos lft1 lft2 term1 term2 cuniv with
             | cuniv -> add 1; addc 1; cuniv
             | exception NotConvertible -> add 0; addc 0; raise NotConvertible
           end
       end
+
+and eqappr_or_env cv_pb l2r infos lft1 lft2 term1 term2 cuniv =
+  if clos_env_enabled && clos_env_late && same_closure_env lft1 term1 lft2 term2 then cuniv
+  else eqappr cv_pb l2r infos (lft1, (term1,[])) (lft2, (term2,[])) cuniv
 
 (* Conversion between [lft1](hd1 v1) and [lft2](hd2 v2) *)
 and eqappr cv_pb l2r infos (lft1,st1) (lft2,st2) cuniv =

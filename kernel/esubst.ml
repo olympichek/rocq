@@ -512,6 +512,31 @@ let rec equal_strict eq s1 s2 = s1 == s2 || match s1, s2 with
   Int.equal h1 h2 && equal_tree eq t1 t2 && equal_strict eq r1 r2
 | (Nil _ | Cons _), _ -> false
 
+(* This intentionally compares only matching substitution-tree shapes. A
+   different shape or an exhausted budget leaves equality undecided. The
+   callback shares [fuel] when it recursively compares substituted values. *)
+let equal_bounded fuel eq s1 s2 =
+  let spend () =
+    if !fuel <= 0 then false else (decr fuel; true)
+  in
+  let rec tree t1 t2 = t1 == t2 ||
+    spend () && match t1, t2 with
+    | Leaf (w1, x1), Leaf (w2, x2) ->
+      Int.equal w1 w2 && equal_or_var eq x1 x2
+    | Node (w1, x1, l1, r1, _), Node (w2, x2, l2, r2, _) ->
+      Int.equal w1 w2 && equal_or_var eq x1 x2
+      && tree l1 l2 && tree r1 r2
+    | (Leaf _ | Node _), _ -> false
+  in
+  let rec subs s1 s2 = s1 == s2 ||
+    spend () && match s1, s2 with
+    | Nil (w1, n1), Nil (w2, n2) -> Int.equal w1 w2 && Int.equal n1 n2
+    | Cons (h1, t1, r1), Cons (h2, t2, r2) ->
+      Int.equal h1 h2 && tree t1 t2 && subs r1 r2
+    | (Nil _ | Cons _), _ -> false
+  in
+  subs s1 s2
+
 let equal_entry eq e1 e2 = match e1, e2 with
 | REL i, REL j -> Int.equal i j
 | VAL (k1, v1), VAL (k2, v2) -> Int.equal k1 k2 && eq v1 v2

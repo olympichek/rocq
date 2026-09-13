@@ -157,4 +157,10 @@ val fold : ('acc -> int -> 'acc) -> ('acc -> int -> 'a -> 'acc) ->
     of [repr]s, values compared with [eq]), without allocating when the
     two substitutions are built the same way. *)
 val equal : ('a -> 'a -> bool) -> 'a subs -> 'a subs -> bool
+
+(** A sufficient equality test for identically shaped substitutions. Decrements
+    [fuel] for each visited nonidentical substitution/tree node; [eq] must
+    bound its own work, and may consume the same fuel. False means unknown.
+    No [repr] lists are allocated and a failed comparison is not retried. *)
+val equal_bounded : int ref -> ('a -> 'a -> bool) -> 'a subs -> 'a subs -> bool
 end

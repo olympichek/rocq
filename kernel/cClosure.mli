@@ -126,6 +126,14 @@ val has_default_fid : fconstr -> bool
 val subs_content_fid : subs_content -> int
 val subs_content_equal : subs_content -> subs_content -> bool
 
+(** Sufficient equality of substitutions through identical unreduced closure
+    bodies, with exact universe instances and substitution-tree shifts.
+    Fuel is clamped to 0–4096. False means unknown, including budget exhaustion.
+    Does not reduce cells. Value comparison handles applications,
+    matching lifts and exact references. Higher-order values require
+    existing physical identity. *)
+val equal_usubs_bounded : fuel:int -> usubs -> usubs -> bool
+
 val term_of_fconstr : fconstr -> constr
 val term_of_process : fconstr -> stack -> constr
 val destFLambda :

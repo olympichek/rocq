@@ -143,6 +143,64 @@ let subs_content_equal a b =
   | HigherOrder (n1, f1), HigherOrder (n2, f2) -> Int.equal n1 n2 && f1 == f2
   | (Regular _ | HigherOrder _), _ -> false
 
+(* Compare unreduced closures with physically identical bodies. Matching
+   substitution-tree shapes preserve every shift; equal universe instances
+   preserve the body's universe and relevance annotations. Value comparison
+   handles applications, matching lifts and exact references; setting
+   ROCQ_CLOS_ENV_VALUES=0 disables these cases.
+   Higher-order entries retain their existing physical equality test. *)
+let closure_values_enabled = Sys.getenv_opt "ROCQ_CLOS_ENV_VALUES" <> Some "0"
+let closure_values_stats = Sys.getenv_opt "ROCQ_CLOS_ENV_STATS" = Some "1"
+let closure_values_probes = ref 0
+let closure_values_success = ref 0
+let () = at_exit (fun () -> if closure_values_stats then
+  Printf.eprintf "CLOS_ENV_STATS probes=%d success=%d\n%!"
+    !closure_values_probes !closure_values_success)
+
+let equal_usubs_bounded ~fuel e1 e2 =
+  let fuel = ref (max 0 (min 4096 fuel)) in
+  if closure_values_stats then incr closure_values_probes;
+  let spend n =
+    if n > !fuel then (fuel := 0; false)
+    else (fuel := !fuel - n; true)
+  in
+  let equal_univs u1 u2 = u1 == u2 ||
+    let q1, n1 = UVars.Instance.length u1 in
+    let q2, n2 = UVars.Instance.length u2 in
+    Int.equal q1 q2 && Int.equal n1 n2
+    && spend 1 && spend q1 && spend n1 && UVars.Instance.equal u1 u2
+  in
+  let rec env (s1, u1) (s2, u2) =
+    equal_univs u1 u2 && Esubst.Internal.equal_bounded fuel content s1 s2
+  and content a b =
+    subs_content_equal a b || spend 1 && match a, b with
+    | Regular f1, Regular f2 -> cell f1 f2
+    | (Regular _ | HigherOrder _), _ -> false
+  and cell f1 f2 = f1 == f2 || spend 1 && match f1.term, f2.term with
+    | FCLOS (c1, e1), FCLOS (c2, e2) -> c1 == c2 && env e1 e2
+    | FRel n1, FRel n2 when closure_values_enabled -> Int.equal n1 n2
+    | FFlex (RelKey n1), FFlex (RelKey n2) when closure_values_enabled ->
+      Int.equal n1 n2
+    | FFlex (VarKey x1), FFlex (VarKey x2) when closure_values_enabled ->
+      x1 == x2
+    | FFlex (ConstKey (c1, u1)), FFlex (ConstKey (c2, u2))
+      when closure_values_enabled -> c1 == c2 && equal_univs u1 u2
+    | FLIFT (k1, t1), FLIFT (k2, t2) when closure_values_enabled ->
+      Int.equal k1 k2 && cell t1 t2
+    | FApp (h1, a1), FApp (h2, a2) when closure_values_enabled ->
+      cell h1 h2 && cells a1 a2
+    | _ -> false
+  and cells a1 a2 = a1 == a2 ||
+    let n = Array.length a1 in
+    Int.equal n (Array.length a2) &&
+    let rec loop i = i = n ||
+      spend 1 && cell a1.(i) a2.(i) && loop (i + 1)
+    in loop 0
+  in
+  let ok = env e1 e2 in
+  if ok && closure_values_stats then incr closure_values_success;
+  ok
+
 let set_ntrl v = v.mark <- Ntrl
 
 (* Could issue a warning if no is still Red, pointing out that we loose

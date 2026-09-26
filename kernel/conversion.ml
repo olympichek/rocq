@@ -390,6 +390,8 @@ let cc_resize cache =
 type 'e conv_tab = {
   cnv_inf : clos_infos;
   cnv_typ : bool; (* true if the input terms were well-typed *)
+  cnv_td : bool; (* allow common-type inference for constructor arguments *)
+  cnv_common : bool; (* both compared terms inhabit a common type *)
   lft_tab : clos_tab;
   rgt_tab : clos_tab;
   err_ret : 'e -> payload;
@@ -648,8 +650,20 @@ let cc_enabled =
   | _ -> true
   | exception Not_found -> true
 
+(* A common-type fact is introduced only by comparison of an application
+   spine with an identical head type and already converted earlier arguments.
+   It survives reduction and function eta, but is cleared on
+   ordinary recursive conversion calls. It is stronger than [cnv_typ]. *)
+(* Enabled by default; ROCQ_TYPED_CONV=0 restores the original traversal. *)
+let td_enabled = Sys.getenv_opt "ROCQ_TYPED_CONV" <> Some "0"
+
 (* Conversion between  [lft1]term1 and [lft2]term2 *)
-let rec ccnv ~cache:docache cv_pb l2r infos lft1 lft2 term1 term2 cuniv =
+let rec ccnv ?(common = false) ~cache:docache cv_pb l2r infos lft1 lft2 term1 term2 cuniv =
+  let common = common && infos.cnv_td in
+  let infos =
+    if infos.cnv_common = common then infos
+    else { infos with cnv_common = common }
+  in
   let fast = fast_test lft1 term1 lft2 term2 in
   if fast then cuniv
   else
@@ -945,8 +959,14 @@ and eqwhnf cv_pb l2r infos (lft1, (hd1, v1) as appr1) (lft2, (hd2, v2) as appr2)
         let (_,ty2,bd2) = destFLambda mk_clos hd2 in
         let el1 = el_stack lft1 v1 in
         let el2 = el_stack lft2 v2 in
-        let cuniv = ccnv ~cache:false CONV l2r infos el1 el2 ty1 ty2 cuniv in (* FIXME ty1 / ty2 fresh *)
-        ccnv ~cache:false CONV l2r (push_relevance infos x1) (el_lift el1) (el_lift el2) bd1 bd2 cuniv
+        (* Typing inversion at a common function type already equates the
+           domains. Its codomain also gives a common type to the bodies. *)
+        let cuniv =
+          if infos.cnv_common then cuniv
+          else ccnv ~cache:false CONV l2r infos el1 el2 ty1 ty2 cuniv
+        in
+        ccnv ~common:infos.cnv_common ~cache:false CONV l2r
+          (push_relevance infos x1) (el_lift el1) (el_lift el2) bd1 bd2 cuniv
 
     | (FProd (x1, c1, c2, e), FProd (_, c'1, c'2, e')) ->
         if not (is_empty_stack v1 && is_empty_stack v2) then
@@ -959,7 +979,9 @@ and eqwhnf cv_pb l2r infos (lft1, (hd1, v1) as appr1) (lft2, (hd2, v2) as appr2)
         let x1 = usubst_binder e x1 in
         ccnv ~cache:false cv_pb l2r (push_relevance infos x1) (el_lift el1) (el_lift el2) (mk_clos (usubs_lift e) c2) (mk_clos (usubs_lift e') c'2) cuniv
 
-    (* Eta-expansion on the fly *)
+    (* Eta-expansion on the fly. Without a common type, the other term can
+       be applied outside its domain, so common-type inference is disabled
+       throughout the resulting comparison. *)
     | (FLambda _, _) ->
         let () = match v1 with
         | [] -> ()
@@ -968,6 +990,9 @@ and eqwhnf cv_pb l2r infos (lft1, (hd1, v1) as appr1) (lft2, (hd2, v2) as appr2)
         in
         let (x1,_ty1,bd1) = destFLambda mk_clos hd1 in
         let infos = push_relevance infos x1 in
+        let infos =
+          if infos.cnv_common then infos else { infos with cnv_td = false }
+        in
         eqappr CONV l2r infos
           (el_lift lft1, (bd1, [])) (el_lift lft2, (hd2, eta_expand_stack infos.cnv_inf x1 v2)) cuniv
     | (_, FLambda _) ->
@@ -978,6 +1003,9 @@ and eqwhnf cv_pb l2r infos (lft1, (hd1, v1) as appr1) (lft2, (hd2, v2) as appr2)
         in
         let (x2,_ty2,bd2) = destFLambda mk_clos hd2 in
         let infos = push_relevance infos x2 in
+        let infos =
+          if infos.cnv_common then infos else { infos with cnv_td = false }
+        in
         eqappr CONV l2r infos
           (el_lift lft1, (hd1, eta_expand_stack infos.cnv_inf x2 v1)) (el_lift lft2, (bd2, [])) cuniv
 
@@ -1048,13 +1076,16 @@ and eqwhnf cv_pb l2r infos (lft1, (hd1, v1) as appr1) (lft2, (hd2, v2) as appr2)
       let v1 = append_stack args1 v1 in
       let v2 = append_stack args2 v2 in
       if Int.equal j1 j2 && Ind.CanOrd.equal ind1 ind2 then
+        (* Cumulative universe compatibility alone does not establish equal
+           head types for the common-type argument traversal. *)
+        let common_head = infos.cnv_td && UVars.Instance.equal u1 u2 in
         if UVars.Instance.is_empty u1 || UVars.Instance.is_empty u2 then
           let cuniv = fail_check infos @@ convert_instances ~flex:false u1 u2 cuniv in
-          convert_stacks l2r infos lft1 lft2 v1 v2 cuniv
+          convert_stacks ~common_head l2r infos lft1 lft2 v1 v2 cuniv
         else
           let mind = Environ.lookup_mind (fst ind1) (info_env infos.cnv_inf) in
           match fail_check infos @@ convert_constructors (mind, snd ind1, j1) nargs u1 u2 cuniv with
-          | cuniv -> convert_stacks l2r infos lft1 lft2 v1 v2 cuniv
+          | cuniv -> convert_stacks ~common_head l2r infos lft1 lft2 v1 v2 cuniv
           | exception MustExpand ->
             let env = info_env infos.cnv_inf in
             let hd1 = eta_expand_constructor env pctor1 in
@@ -1199,7 +1230,7 @@ and eqwhnf cv_pb l2r infos (lft1, (hd1, v1) as appr1) (lft2, (hd2, v2) as appr2)
        | FProd _ | FEvar _ | FInt _ | FFloat _ | FString _
        | FArray _ | FIrrelevant), _ -> raise NotConvertible
 
-and convert_stacks ?(mask = [||]) l2r infos lft1 lft2 stk1 stk2 cuniv =
+and convert_stacks ?(mask = [||]) ?(common_head = false) l2r infos lft1 lft2 stk1 stk2 cuniv =
   let f (l1, t1) (l2, t2) cuniv = ccnv ~cache:true CONV l2r infos l1 l2 t1 t2 cuniv in
   let rec cmp_rec nargs pstk1 pstk2 cuniv =
     match (pstk1,pstk2) with
@@ -1265,7 +1296,19 @@ and convert_stacks ?(mask = [||]) l2r infos lft1 lft2 stk1 stk2 cuniv =
       | _ -> cuniv in
   if compare_stack_shape stk1 stk2 then
     let nargs = if Array.is_empty mask then -1 else 0 in
-    cmp_rec nargs (pure_stack lft1 stk1) (pure_stack lft2 stk2) cuniv
+    let s1 = pure_stack lft1 stk1 and s2 = pure_stack lft2 stk2 in
+    let applications_only = List.for_all (function Zlapp _ -> true | _ -> false) in
+    if common_head && infos.cnv_td && applications_only s1 && applications_only s2 then begin
+      (* Each argument has a common expected type because the heads have
+         identical types and all previous arguments have been converted.
+         Compare every argument; relevance masks are not used here. *)
+      let compare_arg cu (l1, t1) (l2, t2) =
+        ccnv ~common:true ~cache:true CONV l2r infos l1 l2 t1 t2 cu
+      in
+      List.fold_left2 (fun cu a b -> match a, b with
+        | Zlapp a, Zlapp b -> Array.fold_left2 compare_arg cu a b
+        | _ -> assert false) cuniv s1 s2
+    end else cmp_rec nargs s1 s2 cuniv
   else raise NotConvertible
 
 and convert_vect ~cache l2r infos lft1 lft2 v1 v2 cuniv =
@@ -1363,6 +1406,8 @@ let clos_gen_conv (type err) ~typed ~use_cache trans cv_pb l2r evars env graph u
       let infos = {
         cnv_inf = infos;
         cnv_typ = typed;
+        cnv_td = typed && td_enabled;
+        cnv_common = false;
         lft_tab = create_tab ();
         rgt_tab = create_tab ();
         err_ret = box;
@@ -1416,7 +1461,9 @@ let () =
       let box = Empty.abort in
       let state = info_univs infos in
       let qual_equal q1 q2 = CClosure.eq_quality infos q1 q2 in
-      let infos = { cnv_inf = infos; cnv_typ = true; lft_tab = tab; rgt_tab = tab; err_ret = box; cnv_cache = None; } in
+      let infos = { cnv_inf = infos; cnv_typ = true; cnv_td = false;
+                    cnv_common = false; lft_tab = tab; rgt_tab = tab;
+                    err_ret = box; cnv_cache = None; } in
       let state', _ = ccnv ~cache:true CONV false infos el_id el_id a b (state, checked_universes_gen false qual_equal) in
       assert (state==state');
       true

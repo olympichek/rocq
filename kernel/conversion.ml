@@ -322,7 +322,7 @@ type conv_cache = {
   (* Ordered full cell IDs; key1 = 0 marks an empty slot. *)
   mutable cc_key1 : int array;
   mutable cc_key2 : int array;
-  (* cc_meta.(i) = (lid1 lsl 18) lor (lid2 lsl 3) lor (pb lsl 1) lor result *)
+  (* cc_meta.(i) = (lid1 lsl 32) lor (lid2 lsl 3) lor (pb lsl 1) lor result *)
   mutable cc_meta : int array;
   mutable cc_cnt : int;
   cc_lifts : int LiftTbl.t;
@@ -338,7 +338,7 @@ let cc_intern cache l = match l with
   | Some id -> id
   | None ->
     let id = cache.cc_nlifts in
-    if id >= 1 lsl 15 then -1
+    if id >= 1 lsl 29 then -1
     else begin
       cache.cc_nlifts <- id + 1;
       LiftTbl.add cache.cc_lifts l id;
@@ -716,7 +716,7 @@ let rec ccnv ?(common = false) ~cache:docache cv_pb l2r infos lft1 lft2 term1 te
         let fid2 = if usefid then CClosure.get_fid v2 else 0 in
         let usefid = usefid && cc_valid_ids fid1 fid2 in
         let pb = match cv_pb with CONV -> 0 | CUMUL -> 1 in
-        let meta0 = (lid1 lsl 18) lor (lid2 lsl 3) lor (pb lsl 1) in
+        let meta0 = (lid1 lsl 32) lor (lid2 lsl 3) lor (pb lsl 1) in
         match (if usefid then cc_find cache fid1 fid2 meta0 else -1) with
         | 1 -> cuniv
         | 0 -> raise NotConvertible

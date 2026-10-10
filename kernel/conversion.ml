@@ -283,8 +283,9 @@ let clos_memo_enabled =
   Sys.getenv_opt "ROCQ_CLOS_MEMO" <> Some "0"
 
 type conv_cache = {
-  (* cc_key.(i) = (fid1 lsl 31) lor fid2; 0 = empty slot *)
-  mutable cc_key : int array;
+  (* Ordered full cell IDs; key1 = 0 marks an empty slot. *)
+  mutable cc_key1 : int array;
+  mutable cc_key2 : int array;
   (* cc_meta.(i) = (lid1 lsl 18) lor (lid2 lsl 3) lor (pb lsl 1) lor result *)
   mutable cc_meta : int array;
   mutable cc_cnt : int;
@@ -308,47 +309,54 @@ let cc_intern cache l = match l with
       id
     end
 
-let cc_mix pk m =
-  let h = pk + m * 0x9E3779B97F4A7C1 in
+let cc_valid_ids fid1 fid2 = fid1 > 0 && fid2 > 0
+
+let cc_mix fid1 fid2 m =
+  let h = fid1 + fid2 * 0x9E3779B97F4A7C1 + m * 0x3F58476D1CE4E5B9 in
   let h = h lxor (h lsr 29) in
   let h = h * 0x3F58476D1CE4E5B9 in
   h lxor (h lsr 32)
 
 (* -1 = absent, 0 = cached failure, 1 = cached success.
    [meta0] must have the result bit clear. *)
-let cc_find cache pk meta0 =
-  if pk lsr 31 > cache.max_uid || pk land 0x7fffffff > cache.max_uid then -1
+let cc_find cache fid1 fid2 meta0 =
+  if fid1 > cache.max_uid || fid2 > cache.max_uid then -1
   else
-  let mask = Array.length cache.cc_key - 1 in
+  let mask = Array.length cache.cc_key1 - 1 in
   let rec go i =
-    let k = Array.unsafe_get cache.cc_key i in
-    if k == 0 then -1
-    else if k == pk
+    let k1 = Array.unsafe_get cache.cc_key1 i in
+    if k1 == 0 then -1
+    else if k1 == fid1 && Array.unsafe_get cache.cc_key2 i == fid2
          && (Array.unsafe_get cache.cc_meta i) lor 1 == meta0 lor 1 then
       (Array.unsafe_get cache.cc_meta i) land 1
     else go ((i + 1) land mask)
   in
-  go ((cc_mix pk meta0) land mask)
+  go ((cc_mix fid1 fid2 meta0) land mask)
 
-let cc_insert_raw key meta pk m =
-  let mask = Array.length key - 1 in
+let cc_insert_raw key1 key2 meta fid1 fid2 m =
+  let mask = Array.length key1 - 1 in
   let rec go i =
-    if Array.unsafe_get key i == 0 then begin
-      Array.unsafe_set key i pk;
+    if Array.unsafe_get key1 i == 0 then begin
+      Array.unsafe_set key1 i fid1;
+      Array.unsafe_set key2 i fid2;
       Array.unsafe_set meta i m
     end else go ((i + 1) land mask)
   in
-  go ((cc_mix pk (m land lnot 1)) land mask)
+  go ((cc_mix fid1 fid2 (m land lnot 1)) land mask)
 
 let cc_resize cache =
-  let old_k = cache.cc_key and old_m = cache.cc_meta in
-  let n = Array.length old_k * 2 in
-  let key = Array.make n 0 and meta = Array.make n 0 in
-  for i = 0 to Array.length old_k - 1 do
-    let pk = Array.unsafe_get old_k i in
-    if pk != 0 then cc_insert_raw key meta pk (Array.unsafe_get old_m i)
+  let old_k1 = cache.cc_key1 and old_k2 = cache.cc_key2
+  and old_m = cache.cc_meta in
+  let n = Array.length old_k1 * 2 in
+  let key1 = Array.make n 0 and key2 = Array.make n 0
+  and meta = Array.make n 0 in
+  for i = 0 to Array.length old_k1 - 1 do
+    let fid1 = Array.unsafe_get old_k1 i in
+    if fid1 != 0 then cc_insert_raw key1 key2 meta fid1
+      (Array.unsafe_get old_k2 i) (Array.unsafe_get old_m i)
   done;
-  cache.cc_key <- key;
+  cache.cc_key1 <- key1;
+  cache.cc_key2 <- key2;
   cache.cc_meta <- meta
 
 type 'e conv_tab = {
@@ -670,12 +678,10 @@ let rec ccnv ?(common = false) ~cache:docache cv_pb l2r infos lft1 lft2 term1 te
       else begin
         let fid1 = if usefid then CClosure.get_fid v1 else 0 in
         let fid2 = if usefid then CClosure.get_fid v2 else 0 in
-        (* out of packing range: fall back to level 2 alone *)
-        let usefid = usefid && fid1 < 1 lsl 31 && fid2 < 1 lsl 31 in
-        let pk = (fid1 lsl 31) lor fid2 in
+        let usefid = usefid && cc_valid_ids fid1 fid2 in
         let pb = match cv_pb with CONV -> 0 | CUMUL -> 1 in
         let meta0 = (lid1 lsl 18) lor (lid2 lsl 3) lor (pb lsl 1) in
-        match (if usefid then cc_find cache pk meta0 else -1) with
+        match (if usefid then cc_find cache fid1 fid2 meta0 else -1) with
         | 1 -> cuniv
         | 0 -> raise NotConvertible
         | _ ->
@@ -684,10 +690,10 @@ let rec ccnv ?(common = false) ~cache:docache cv_pb l2r infos lft1 lft2 term1 te
               let maxid = if fid1 > fid2 then fid1 else fid2 in
               let () = if maxid > cache.max_uid then cache.max_uid <- maxid in
               if cache.cc_cnt < cc_max_size then begin
-                if 2 * (cache.cc_cnt + 1) > Array.length cache.cc_key then
+                if 2 * (cache.cc_cnt + 1) > Array.length cache.cc_key1 then
                   cc_resize cache;
                 cache.cc_cnt <- cache.cc_cnt + 1;
-                cc_insert_raw cache.cc_key cache.cc_meta pk (meta0 lor r)
+                cc_insert_raw cache.cc_key1 cache.cc_key2 cache.cc_meta fid1 fid2 (meta0 lor r)
               end
             end
           in
@@ -1358,7 +1364,8 @@ let clos_gen_conv (type err) ~typed ~use_cache trans cv_pb l2r evars env graph u
       let box e = Error.Error e in
       let cache =
         if use_cache && cc_enabled then
-          Some { cc_key = Array.make 256 0; cc_meta = Array.make 256 0;
+          Some { cc_key1 = Array.make 256 0; cc_key2 = Array.make 256 0;
+                 cc_meta = Array.make 256 0;
                  cc_cnt = 0; cc_lifts = LiftTbl.create 16; cc_nlifts = 1;
                  max_uid = 0;
                  cc_clos =

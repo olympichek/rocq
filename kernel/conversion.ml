@@ -256,11 +256,13 @@ let subs_equal s1 s2 = Esubst.Internal.equal subs_content_equal s1 s2
 let clos_pair_hash c1 s1 c2 s2 lid1 lid2 pb =
   (* The default shallow constr hash (10 meaningful nodes) collides on
      self-similar telescope terms; traverse deeper at bounded cost. *)
-  Stdlib.Hashtbl.hash
-    (Stdlib.Hashtbl.hash_param 128 256 c1,
-     Stdlib.Hashtbl.hash_param 128 256 c2,
-     subs_hash s1, subs_hash s2,
-     lid1, lid2, pb)
+  (* Hash the right substitution first: its traversal can assign stable
+     cell IDs that the left traversal must observe before hashes are reused. *)
+  let hs2 = subs_hash s2 in
+  let hs1 = subs_hash s1 in
+  let hc2 = Stdlib.Hashtbl.hash_param 128 256 c2 in
+  let hc1 = if c1 == c2 then hc2 else Stdlib.Hashtbl.hash_param 128 256 c1 in
+  Stdlib.Hashtbl.hash (hc1, hc2, hs1, hs2, lid1, lid2, pb)
 
 module ClosPairTbl = Hashtbl.Make(struct
   type t = clos_pair_key

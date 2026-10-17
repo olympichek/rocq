@@ -52,6 +52,14 @@ val inh_conv_coerce_rigid_to : ?loc:Loc.t -> program_mode:bool -> resolve_tc:boo
   ?use_coercions:bool -> env -> evar_map -> ?flags:Evarconv.unify_flags ->
   unsafe_judgment -> types -> evar_map * unsafe_judgment * coercion_trace option
 
+(** As [inh_conv_coerce_to], with an explicit caller guarantee that both
+    [j.uj_type] and the expected domain are wellformed types in [env]/[sigma].
+    This is not established merely by their absence of unresolved evars.
+    Callers manufacturing unsafe judgments must establish this contract. *)
+val inh_conv_coerce_to_known_types : ?loc:Loc.t -> program_mode:bool -> resolve_tc:bool ->
+  ?use_coercions:bool -> env -> evar_map -> ?flags:Evarconv.unify_flags ->
+  unsafe_judgment -> types -> evar_map * unsafe_judgment * coercion_trace option
+
 (** [inh_pattern_coerce_to loc env isevars pat ind1 ind2] coerces the Cases
     pattern [pat] typed in [ind1] into a pattern typed in [ind2];
     raises [Not_found] if no coercion found *)

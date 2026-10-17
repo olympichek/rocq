@@ -76,6 +76,12 @@ val generic_conv : ?cache_fixed_constraints:bool -> conv_pb -> l2r:bool
   -> TransparentState.t -> env -> ?evars:CClosure.evar_handler
   -> ('a, 'err) generic_conversion_function
 
+(** Checked conversion of independently welltyped inputs in a regular
+    environment. No common root type is assumed and no constraints are
+    inferred. The environment must contain the intended universe/quality
+    context; quality equality uses the supplied evar handler. *)
+val conv_welltyped : conv_pb -> types extended_conversion_function
+
 val default_conv     : conv_pb -> types kernel_conversion_function
 val default_conv_leq : types kernel_conversion_function
 

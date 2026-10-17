@@ -1515,18 +1515,29 @@ let () =
   in
   CClosure.set_conv conv
 
-let gen_conv ~typed cv_pb ?(l2r=false) ?(reds=TransparentState.full) env ?(evars=default_evar_handler env) t1 t2 =
-  let univs = Environ.universes env in
-  let state = univs in
-  let b =
-    if cv_pb = CUMUL then leq_constr_univs univs t1 t2
-    else eq_constr_univs univs t1 t2
+type checked_quality_policy = Syntactic_quality | Evar_quality
+
+(* Keep the typing premise separate from the quality interpretation.
+   Both policies check a fixed graph and return no inferred constraints. *)
+let checked_conv ~typed ~quality_policy cv_pb ~l2r ~reds env ~evars t1 t2 =
+  let graph = Environ.universes env in
+  let immediate = match cv_pb with
+    | CUMUL -> leq_constr_univs graph t1 t2
+    | CONV -> eq_constr_univs graph t1 t2
   in
-    if b then Result.Ok ()
-    else match clos_gen_conv ~typed ~use_cache:true reds cv_pb l2r evars env univs (state, checked_universes) t1 t2 with
-    | Result.Ok (_ : 'a * ('a, Empty.t) universe_compare)-> Result.Ok ()
-    | Result.Error None -> Result.Error ()
-    | Result.Error (Some e) -> Empty.abort e
+  if immediate then Result.Ok () else
+  let check = match quality_policy with
+    | Syntactic_quality -> checked_universes
+    | Evar_quality -> checked_universes_gen true evars.qual_equal
+  in
+  match clos_gen_conv ~typed ~use_cache:true reds cv_pb l2r evars env graph
+      (graph, check) t1 t2 with
+  | Result.Ok _ -> Result.Ok ()
+  | Result.Error None -> Result.Error ()
+  | Result.Error (Some e) -> Empty.abort e
+
+let gen_conv ~typed cv_pb ?(l2r=false) ?(reds=TransparentState.full) env ?(evars=default_evar_handler env) t1 t2 =
+  checked_conv ~typed ~quality_policy:Syntactic_quality cv_pb ~l2r ~reds env ~evars t1 t2
 
 let conv = gen_conv ~typed:false CONV
 let conv_leq = gen_conv ~typed:false CUMUL
@@ -1546,17 +1557,7 @@ let generic_conv ?(cache_fixed_constraints=false) cv_pb ~l2r reds env
 (* Use the caller's evar handler for quality equality and term expansion. *)
 let conv_welltyped cv_pb ?(l2r=false) ?(reds=TransparentState.full) env
     ?(evars=default_evar_handler env) t1 t2 =
-  let graph = Environ.universes env in
-  let immediate = match cv_pb with
-    | CUMUL -> leq_constr_univs graph t1 t2
-    | CONV -> eq_constr_univs graph t1 t2
-  in
-  if immediate then Result.Ok () else
-  match clos_gen_conv ~typed:true ~use_cache:true reds cv_pb l2r evars env graph
-      (graph, checked_universes_gen true evars.qual_equal) t1 t2 with
-  | Result.Ok _ -> Result.Ok ()
-  | Result.Error None -> Result.Error ()
-  | Result.Error (Some e) -> Empty.abort e
+  checked_conv ~typed:true ~quality_policy:Evar_quality cv_pb ~l2r ~reds env ~evars t1 t2
 
 let default_conv cv_pb env t1 t2 =
     gen_conv ~typed:true cv_pb env t1 t2

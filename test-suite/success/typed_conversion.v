@@ -61,3 +61,63 @@ Proof. exact_no_check (eq_refl (observe _ domain_a)). Fail Defined. Abort.
 
 Goal (nat -> nat) = (bool -> nat).
 Proof. exact_no_check (eq_refl (nat -> nat)). Fail Defined. Abort.
+
+Module CommonRecordParameters.
+Record Box (A : Type) (P : A -> Type) := box { bx : A; by_value : P bx }.
+Arguments box {A P} bx by_value.
+
+Parameter hold : forall A P, Box A P -> nat.
+Definition left := hold nat (fun _ => nat) (box 0 0).
+Definition same := hold nat (fun _ => (fun T => T) nat) (box 0 0).
+Definition wrong_field := hold nat (fun _ => nat) (box 0 1).
+Definition wrong_prefix := hold bool (fun _ => nat) (box true 0).
+
+Goal left = same.
+Proof. now exact_no_check (eq_refl left). Defined.
+Goal left = wrong_field.
+Proof. exact_no_check (eq_refl left). Fail Defined. Abort.
+Goal left = wrong_prefix.
+Proof. exact_no_check (eq_refl left). Fail Defined. Abort.
+
+(* Projection and later applications must still be compared after the
+   initial constant application prefix. *)
+Record Viewer := viewer { run : nat -> nat }.
+
+Parameter owner : forall A P, Box A P -> Viewer.
+Definition projected := run (owner nat (fun _ => nat) (box 0 0)) 0.
+Definition projected_same :=
+  run (owner nat (fun _ => (fun T => T) nat) (box 0 0)) ((fun n => n) 0).
+Definition wrong_argument := run (owner nat (fun _ => nat) (box 0 0)) 1.
+Definition wrong_owner := run (owner nat (fun _ => nat) (box 0 1)) 0.
+
+Goal projected = projected_same.
+Proof. now exact_no_check (eq_refl projected). Defined.
+Goal projected = wrong_argument.
+Proof. exact_no_check (eq_refl projected). Fail Defined. Abort.
+Goal projected = wrong_owner.
+Proof. exact_no_check (eq_refl projected). Fail Defined. Abort.
+
+Parameter inspect : forall A P, Box A P -> bool.
+Definition branched := if inspect nat (fun _ => nat) (box 0 0) then 0 else 1.
+Definition wrong_branch := if inspect nat (fun _ => nat) (box 0 0) then 1 else 1.
+
+Goal branched = wrong_branch.
+Proof. exact_no_check (eq_refl branched). Fail Defined. Abort.
+
+Inductive Indexed : nat -> Type := indexed : forall n, Indexed n.
+Parameter see_index : forall n, Indexed n -> Type.
+
+Goal see_index 0 (indexed 0) = see_index 1 (indexed 1).
+Proof. exact_no_check (eq_refl (see_index 0 (indexed 0))). Fail Defined. Abort.
+
+Inductive Nonuniform (A : Type) : Type :=
+| nonuniform_zero : Nonuniform A
+| nonuniform_step : Nonuniform (A * A)%type -> Nonuniform A.
+Parameter see_nonuniform : forall A, Nonuniform A -> nat.
+Definition nonuniform_left :=
+  see_nonuniform nat (@nonuniform_step nat (@nonuniform_zero (nat * nat)%type)).
+Definition nonuniform_wrong := see_nonuniform nat (@nonuniform_zero nat).
+
+Goal nonuniform_left = nonuniform_wrong.
+Proof. exact_no_check (eq_refl nonuniform_left). Fail Defined. Abort.
+End CommonRecordParameters.

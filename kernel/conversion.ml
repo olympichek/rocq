@@ -365,7 +365,7 @@ let cc_resize cache =
 type 'e conv_tab = {
   cnv_inf : clos_infos;
   cnv_typ : bool; (* true if the input terms were well-typed *)
-  cnv_td : bool; (* allow common-type inference for constructor arguments *)
+  cnv_td : bool; (* allow common expected-type guidance *)
   cnv_common : bool; (* both compared terms inhabit a common type *)
   lft_tab : clos_tab;
   rgt_tab : clos_tab;
@@ -823,7 +823,12 @@ and eqwhnf cv_pb l2r infos (lft1, (hd1, v1) as appr1) (lft2, (hd2, v2) as appr2)
          | RelKey _ | VarKey _ -> [||]
          else [||]
          in
-         convert_stacks ~mask l2r infos lft1 lft2 v1 v2 cuniv
+         let constant_prefix = infos.cnv_td && match fl1, fl2 with
+         | ConstKey (c1, u1), ConstKey (c2, u2) ->
+           Constant.UserOrd.equal c1 c2 && UVars.Instance.equal u1 u2
+         | _ -> false
+         in
+         convert_stacks ~mask ~constant_prefix l2r infos lft1 lft2 v1 v2 cuniv
        with NotConvertible | NotConvertibleTrace _ ->
         (* Cached successes may depend on obligations discarded by this fallback. *)
         (match infos.cnv_state_token, before with
@@ -1071,13 +1076,23 @@ and eqwhnf cv_pb l2r infos (lft1, (hd1, v1) as appr1) (lft2, (hd2, v2) as appr2)
         (* Cumulative universe compatibility alone does not establish equal
            head types for the common-type argument traversal. *)
         let common_head = infos.cnv_td && UVars.Instance.equal u1 u2 in
+        let skip_parameters =
+          if common_head && infos.cnv_common && Ind.UserOrd.equal ind1 ind2 then
+            let mib, mip = Inductive.lookup_mind_specif (info_env infos.cnv_inf) ind1 in
+            match mip.mind_record with
+            | PrimRecord _ when mip.mind_nrealargs = 0 &&
+                nargs = mib.mind_nparams + mip.mind_consnrealargs.(j1 - 1) ->
+              mib.mind_nparams
+            | _ -> 0
+          else 0
+        in
         if UVars.Instance.is_empty u1 || UVars.Instance.is_empty u2 then
           let cuniv = fail_check infos @@ convert_instances ~flex:false u1 u2 cuniv in
-          convert_stacks ~common_head l2r infos lft1 lft2 v1 v2 cuniv
+          convert_stacks ~common_head ~skip_parameters l2r infos lft1 lft2 v1 v2 cuniv
         else
           let mind = Environ.lookup_mind (fst ind1) (info_env infos.cnv_inf) in
           match fail_check infos @@ convert_constructors (mind, snd ind1, j1) nargs u1 u2 cuniv with
-          | cuniv -> convert_stacks ~common_head l2r infos lft1 lft2 v1 v2 cuniv
+          | cuniv -> convert_stacks ~common_head ~skip_parameters l2r infos lft1 lft2 v1 v2 cuniv
           | exception MustExpand ->
             let env = info_env infos.cnv_inf in
             let hd1 = eta_expand_constructor env pctor1 in
@@ -1222,7 +1237,8 @@ and eqwhnf cv_pb l2r infos (lft1, (hd1, v1) as appr1) (lft2, (hd2, v2) as appr2)
        | FProd _ | FEvar _ | FInt _ | FFloat _ | FString _
        | FArray _ | FIrrelevant), _ -> raise NotConvertible
 
-and convert_stacks ?(mask = [||]) ?(common_head = false) l2r infos lft1 lft2 stk1 stk2 cuniv =
+and convert_stacks ?(mask = [||]) ?(common_head = false)
+    ?(constant_prefix = false) ?(skip_parameters = 0) l2r infos lft1 lft2 stk1 stk2 cuniv =
   let f (l1, t1) (l2, t2) cuniv = ccnv ~cache:true CONV l2r infos l1 l2 t1 t2 cuniv in
   let rec cmp_rec nargs pstk1 pstk2 cuniv =
     match (pstk1,pstk2) with
@@ -1290,15 +1306,31 @@ and convert_stacks ?(mask = [||]) ?(common_head = false) l2r infos lft1 lft2 stk
     let nargs = if Array.is_empty mask then -1 else 0 in
     let s1 = pure_stack lft1 stk1 and s2 = pure_stack lft2 stk2 in
     let applications_only = List.for_all (function Zlapp _ -> true | _ -> false) in
-    if common_head && infos.cnv_td && applications_only s1 && applications_only s2 then begin
+    if constant_prefix then begin
+      (* Identical head types and converted preceding arguments establish a
+         common expected type. Check even masked arguments, and stop this
+         guidance at the first elimination frame. *)
+      match s1, s2 with
+      | Zlapp a :: tail1, Zlapp b :: tail2 ->
+        let compare cu (l1, t1) (l2, t2) =
+          ccnv ~common:true ~cache:true CONV l2r infos l1 l2 t1 t2 cu
+        in
+        let cu = Array.fold_left2 compare cuniv a b in
+        cmp_rec (-1) tail1 tail2 cu
+      | _ -> cmp_rec nargs s1 s2 cuniv
+    end else if common_head && infos.cnv_td && applications_only s1 && applications_only s2 then begin
       (* Each argument has a common expected type because the heads have
          identical types and all previous arguments have been converted.
-         Compare every argument; relevance masks are not used here. *)
+         A shared result type determines saturated primitive-record parameters;
+         all other arguments are checked. Relevance masks are not used here. *)
       let compare_arg cu (l1, t1) (l2, t2) =
         ccnv ~common:true ~cache:true CONV l2r infos l1 l2 t1 t2 cu
       in
+      let position = ref 0 in
       List.fold_left2 (fun cu a b -> match a, b with
-        | Zlapp a, Zlapp b -> Array.fold_left2 compare_arg cu a b
+        | Zlapp a, Zlapp b -> Array.fold_left2 (fun cu x y ->
+            let i = !position in incr position;
+            if i < skip_parameters then cu else compare_arg cu x y) cu a b
         | _ -> assert false) cuniv s1 s2
     end else cmp_rec nargs s1 s2 cuniv
   else raise NotConvertible

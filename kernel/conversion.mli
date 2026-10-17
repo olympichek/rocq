@@ -63,8 +63,16 @@ val conv : constr extended_conversion_function
 val conv_leq : types extended_conversion_function
 
 (** The failure values depend on the universe state functions
-    (for better error messages). *)
-val generic_conv : conv_pb -> l2r:bool
+    (for better error messages).
+
+    [cache_fixed_constraints] permits state-identity comparers, whose outcomes are
+    stable in their fixed initial state (unit or a checked universe graph).
+    Growing states require immutable idempotent union of fixed obligations
+    for each operation and state-independent outcome constructors; mere
+    monotonicity and append-only logs do not qualify. Growth must change
+    physical identity. Failed speculation invalidates dependent entries.
+    The [compare_irrelevant] gate is additionally required. *)
+val generic_conv : ?cache_fixed_constraints:bool -> conv_pb -> l2r:bool
   -> TransparentState.t -> env -> ?evars:CClosure.evar_handler
   -> ('a, 'err) generic_conversion_function
 

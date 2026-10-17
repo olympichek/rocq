@@ -35,3 +35,23 @@ Fail Defined.
 Abort.
 Print Assumptions ground_conversion.
 Print Assumptions product_coercion.
+
+From Corelib Require Import Setoid CMorphisms.
+
+(* Graph equality alone does not replace assignments of flexible universes.
+   Leaving those assignments unresolved breaks later relation inference. *)
+Section FlexibleUniverses.
+  Context (A : Set) (R : A -> A -> Prop) (f : A -> Set).
+  Context (PF : CMorphisms.Proper
+    (CMorphisms.respectful R CRelationClasses.iffT) f).
+
+  Definition inferred_relation :
+    { rel : CRelationClasses.crelation (A -> Set) & CMorphisms.Proper rel f }.
+  Proof. eexists. now exact PF. Defined.
+
+  Context (ER : CRelationClasses.Equivalence R).
+  #[local] Existing Instances ER PF.
+
+  Lemma rewrite_set_valued x x' : R x x' -> f x -> f x'.
+  Proof. intros H H0. now rewrite H in H0. Qed.
+End FlexibleUniverses.

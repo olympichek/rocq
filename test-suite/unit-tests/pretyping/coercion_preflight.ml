@@ -135,6 +135,54 @@ let transparency_and_location known =
     | Some actual -> Loc.unloc actual = Loc.unloc loc
     | None -> false
 
+(* Equality in the graph is not an assignment of a flexible level. Both
+   APIs must preserve unification's normalization side effect, including
+   when a beta redex prevents the cheap structural comparison. *)
+let flexible_equality beta known =
+  let u, v = level 3, level 4 in
+  let equality = Univ.UnivConstraints.singleton (u, Univ.UnivConstraint.Eq, v) in
+  let constraints = List.fold_left (fun s c -> Univ.UnivConstraints.add c s)
+    equality [u, Univ.UnivConstraint.Lt, top; v, Univ.UnivConstraint.Lt, top] in
+  let levels = Univ.Level.Set.add u (Univ.Level.Set.singleton v) in
+  let sigma = Evd.merge_universe_context_set UState.univ_flexible
+    (Evd.from_env env) (levels, constraints) in
+  let env = Environ.set_universes (Evd.universes sigma) env in
+  let name = Names.Constant.make2 (Names.ModPath.MPfile Names.DirPath.empty)
+    (Names.Id.of_string "preflight_flexible") in
+  let ty = mkProd (annot, sort top, sort top) in
+  ignore (Typeops.infer env ty);
+  let declaration = {
+    Declarations.const_hyps = [];
+    const_univ_hyps = UVars.Instance.empty;
+    const_body = Declarations.Undef None;
+    const_type = ty;
+    const_relevance = Sorts.Relevant;
+    const_body_code = Vmemitcodes.BCuncompiled;
+    const_universes = Declarations.Monomorphic;
+    const_inline_code = false;
+    const_typing_flags = Environ.typing_flags env;
+  } in
+  let env = Environ.add_constant name declaration env in
+  let apply arg = mkApp (mkConstU (name, UVars.Instance.empty), [|arg|]) in
+  let argument = if beta then
+    mkApp (mkLambda (annot, sort top, mkRel 1), [|sort u|]) else sort u in
+  let actual, expected = apply argument, apply (sort v) in
+  List.iter (fun ty -> ignore (Typeops.infer env ty)) [actual; expected];
+  let normalized_equal sigma =
+    Univ.Universe.equal
+      (UState.nf_universe (Evd.ustate sigma) (Univ.Universe.make u))
+      (UState.nf_universe (Evd.ustate sigma) (Univ.Universe.make v)) in
+  assert (UGraph.check_constraints equality (Evd.universes sigma));
+  assert (not (normalized_equal sigma));
+  let env = assume actual env in
+  let j = judgment env (mkRel 1) in
+  if beta then
+    assert (EConstr.leq_constr_universes env sigma j.Environ.uj_type
+      (e expected) = None);
+  let result, j', _ = coerce known env sigma j (e expected) in
+  normalized_equal result
+  && EConstr.eq_constr result j.Environ.uj_val j'.Environ.uj_val
+
 let tests = [
   mk_bool_test "preflight-ground" "ground conversion preserves state and value"
     (both ground);
@@ -152,6 +200,12 @@ let tests = [
   mk_bool_test "preflight-transparency-location"
     "opaque conversion rejects with the original error location"
     (both transparency_and_location);
+  mk_bool_test "preflight-flexible-equality"
+    "entailed flexible equality is assigned, not only graph-checked"
+    (both (flexible_equality false));
+  mk_bool_test "preflight-flexible-beta"
+    "beta conversion still assigns an entailed flexible equality"
+    (both (flexible_equality true));
   mk_bool_test "preflight-flags" "supplied reduction flags preserve legacy behavior"
     (flags_compatibility ());
 ]

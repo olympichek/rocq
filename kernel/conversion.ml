@@ -1579,6 +1579,21 @@ let generic_conv ?(cache_fixed_constraints=false) cv_pb ~l2r reds env
   | Result.Ok (s, _) -> Result.Ok s
   | Result.Error e -> Result.Error e
 
+(* Use the caller's evar handler for quality equality and term expansion. *)
+let conv_welltyped cv_pb ?(l2r=false) ?(reds=TransparentState.full) env
+    ?(evars=default_evar_handler env) t1 t2 =
+  let graph = Environ.universes env in
+  let immediate = match cv_pb with
+    | CUMUL -> leq_constr_univs graph t1 t2
+    | CONV -> eq_constr_univs graph t1 t2
+  in
+  if immediate then Result.Ok () else
+  match clos_gen_conv ~typed:true ~use_cache:true reds cv_pb l2r evars env graph
+      (graph, checked_universes_gen true evars.qual_equal) t1 t2 with
+  | Result.Ok _ -> Result.Ok ()
+  | Result.Error None -> Result.Error ()
+  | Result.Error (Some e) -> Empty.abort e
+
 let default_conv cv_pb env t1 t2 =
     gen_conv ~typed:true cv_pb env t1 t2
 

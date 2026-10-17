@@ -480,7 +480,7 @@ let adjust_evar_source sigma na c =
 let inh_conv_coerce_to_tycon ?loc ~flags:{ program_mode; resolve_tc; use_coercions; } env sigma j = function
   | None -> sigma, j, Some Coercion.empty_coercion_trace
   | Some t ->
-    Coercion.inh_conv_coerce_to ?loc ~program_mode ~resolve_tc ~use_coercions !!env sigma j t
+    Coercion.inh_conv_coerce_to_known_types ?loc ~program_mode ~resolve_tc ~use_coercions !!env sigma j t
 
 let check_instance subst = function
   | [] -> ()

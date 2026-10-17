@@ -799,3 +799,29 @@ let inh_conv_coerce_to ?loc ~program_mode ~resolve_tc ?use_coercions env sigma ?
   inh_conv_coerce_to_gen ?loc ~program_mode ~resolve_tc ?use_coercions false ?flags env sigma
 let inh_conv_coerce_rigid_to ?loc ~program_mode ~resolve_tc ?use_coercions env sigma ?flags =
   inh_conv_coerce_to_gen ?loc ~program_mode ~resolve_tc ?use_coercions true ?flags env sigma
+
+(* The caller supplies regularity; absence of unresolved term holes alone
+   does not establish it. Stateful inference remains the fallback. *)
+let is_conv_known_types env sigma (flags : Evarconv.unify_flags) t expected =
+  if not flags.modulo_betaiota ||
+      Evarutil.has_undefined_evars_or_metas sigma t ||
+      Evarutil.has_undefined_evars_or_metas sigma expected then false
+  else
+    let env = Environ.set_qualities (Evd.elim_graph sigma) env in
+    let env = Environ.set_universes (Evd.universes sigma) env in
+    Result.is_ok (Conversion.conv_welltyped Conversion.CUMUL ~l2r:false
+      ~reds:flags.closed_ts env ~evars:(Evd.evar_handler sigma)
+      (EConstr.Unsafe.to_constr t) (EConstr.Unsafe.to_constr expected))
+
+let inh_conv_coerce_to_known_types ?loc ~program_mode ~resolve_tc ?use_coercions
+    env sigma ?flags cj t =
+  try
+    let check_flags = match flags with Some flags -> flags | None -> default_flags_of env in
+    if is_conv_known_types env sigma check_flags cj.uj_type t then
+      (sigma, { cj with uj_type = t }, Some IdCoe)
+    else inh_conv_coerce_to ?loc ~program_mode ~resolve_tc ?use_coercions env sigma ?flags cj t
+  with e when Option.has_some loc ->
+    let _, info as iexn = Exninfo.capture e in
+    match Loc.get_loc info with
+    | Some _ -> Exninfo.iraise iexn
+    | None -> Exninfo.iraise (e, Loc.add_loc info (Option.get loc))

@@ -239,9 +239,9 @@ let warn_bytecode_compiler_failed =
          (fun () -> strbrk "Bytecode compiler failed, " ++
                       strbrk "falling back to standard conversion")
 
-let vm_conv_gen (type err) cv_pb sigma env univs t1 t2 =
+let vm_conv_gen_core (type err) ~cache_fixed_constraints cv_pb sigma env univs t1 t2 =
   if not (typing_flags env).Declarations.enable_VM then
-    Conversion.generic_conv cv_pb ~l2r:false ~evars:sigma.Genlambda.evars_val
+    Conversion.generic_conv ~cache_fixed_constraints cv_pb ~l2r:false ~evars:sigma.Genlambda.evars_val
       TransparentState.full env univs t1 t2
   else
   let exception Error of err in
@@ -256,8 +256,12 @@ let vm_conv_gen (type err) cv_pb sigma env univs t1 t2 =
   | Error e -> Result.Error (Some e)
   | Not_found | Invalid_argument _ | Vmerrors.CompileError _ ->
     warn_bytecode_compiler_failed ();
-    Conversion.generic_conv cv_pb ~l2r:false ~evars:sigma.Genlambda.evars_val
+    Conversion.generic_conv ~cache_fixed_constraints cv_pb ~l2r:false ~evars:sigma.Genlambda.evars_val
       TransparentState.full env univs t1 t2
+
+(* Arbitrary public comparers do not opt in to stateful caching. *)
+let vm_conv_gen cv_pb sigma env univs t1 t2 =
+  vm_conv_gen_core ~cache_fixed_constraints:false cv_pb sigma env univs t1 t2
 
 let vm_conv cv_pb env t1 t2 =
   let univs = Environ.universes env in
@@ -270,7 +274,7 @@ let vm_conv cv_pb env t1 t2 =
     let state = (univs, checked_universes) in
     let ans : (UGraph.t, 'a option) result =
       NewProfile.profile "vm_conv" (fun () ->
-          vm_conv_gen cv_pb (Genlambda.empty_evars env) env state t1 t2)
+          vm_conv_gen_core ~cache_fixed_constraints:true cv_pb (Genlambda.empty_evars env) env state t1 t2)
         ()
     in
     match ans with

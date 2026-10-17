@@ -177,7 +177,7 @@ let is_conv_modulo_universes env sigma t1 t2 =
   let t1 = EConstr.Unsafe.to_constr t1 in
   let t2 = EConstr.Unsafe.to_constr t2 in
   let env = Environ.set_universes (Evd.universes sigma) env in
-  match Conversion.generic_conv ~l2r:false Conversion.CONV ~evars
+  match Conversion.generic_conv ~cache_fixed_constraints:true ~l2r:false Conversion.CONV ~evars
           TransparentState.full env ((), modulo_universes_compare) t1 t2 with
   | Result.Ok () -> true
   | Result.Error None -> false

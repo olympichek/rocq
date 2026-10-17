@@ -202,8 +202,9 @@ let convert_inductives_gen cmp_instances cmp_cumul cv_pb (mind,ind) nargs u1 u2 
    by their stable ids, modulo FLIFT wrappers — at a given lift pair and
    conversion problem. Lifts are interned to small ids so that keys and
    payloads fit in machine integers, stored in a flat open-addressing
-   table. Only sound for checked conversion, where results are
-   deterministic and no universe constraints are accumulated. *)
+   table. Checked conversion has a fixed universe state. Inferred conversion
+   may cache fixed obligations added by immutable union, provided entries are
+   invalidated when speculative comparison rolls back those obligations. *)
 
 module LiftTbl = Hashtbl.Make(struct
   type t = lift
@@ -370,9 +371,20 @@ type 'e conv_tab = {
   rgt_tab : clos_tab;
   err_ret : 'e -> payload;
   cnv_cache : conv_cache option;
+  cnv_state_token : unit ref ref option;
+  (* Fresh on state changes; never rewound by speculative rollback. *)
 }
 (** Invariant: for any tl ∈ lft_tab and tr ∈ rgt_tab, there is no mutable memory
     location contained both in tl and in tr. *)
+
+(* Keep lift IDs stable: active outer frames may already retain them. *)
+let clear_conversion_entries infos = match infos.cnv_cache with
+| None -> ()
+| Some cache ->
+  Array.fill cache.cc_key1 0 (Array.length cache.cc_key1) 0;
+  cache.cc_cnt <- 0;
+  (match cache.cc_clos with None -> () | Some cp ->
+    ClosPairTbl.clear cp.cp_full)
 
 let fail_check (infos : 'err conv_tab) (state, check) = match state with
 | Result.Ok state -> (state, check)
@@ -801,6 +813,7 @@ and eqwhnf cv_pb l2r infos (lft1, (hd1, v1) as appr1) (lft2, (hd2, v2) as appr2)
 
     (* 2 constants, 2 local defined vars or 2 defined rels *)
     | (FFlex fl1, FFlex fl2) ->
+      let before = match infos.cnv_state_token with None -> None | Some t -> Some !t in
       (try
          let nargs = same_args_size v1 v2 in
          let cuniv = conv_table_key infos ~nargs fl1 fl2 cuniv in
@@ -812,6 +825,10 @@ and eqwhnf cv_pb l2r infos (lft1, (hd1, v1) as appr1) (lft2, (hd2, v2) as appr2)
          in
          convert_stacks ~mask l2r infos lft1 lft2 v1 v2 cuniv
        with NotConvertible | NotConvertibleTrace _ ->
+        (* Cached successes may depend on obligations discarded by this fallback. *)
+        (match infos.cnv_state_token, before with
+         | Some token, Some before when !token != before -> clear_conversion_entries infos
+         | _ -> ());
         let r1 = unfold_ref_with_args infos.cnv_inf infos.lft_tab fl1 v1 in
         let r2 = unfold_ref_with_args infos.cnv_inf infos.rgt_tab fl2 v2 in
         match r1, r2 with
@@ -1358,8 +1375,27 @@ and convert_list ~cache l2r infos lft1 lft2 v1 v2 cuniv = match v1, v2 with
   convert_list ~cache l2r infos lft1 lft2 v1 v2 cuniv
 | _, _ -> raise NotConvertible
 
-let clos_gen_conv (type err) ~typed ~use_cache trans cv_pb l2r evars env graph univs t1 t2 =
+let clos_gen_conv (type err) ?(cache_fixed_constraints=false)
+    ~typed ~use_cache trans cv_pb l2r evars env graph univs t1 t2 =
   NewProfile.profile "Conversion" begin fun () ->
+      let state_token = if cache_fixed_constraints then Some (ref (ref ())) else None in
+      let track before result =
+        (match result, state_token with
+         | Result.Ok after, Some token when after != before -> token := ref ()
+         | _ -> ());
+        result
+      in
+      let univs = match state_token with
+      | None -> univs
+      | Some _ ->
+        let state, check = univs in
+        let compare_sorts pb a b s = track s (check.compare_sorts pb a b s) in
+        let compare_instances ~flex a b s = track s (check.compare_instances ~flex a b s) in
+        let compare_cumul_instances pb variance a b s =
+          track s (check.compare_cumul_instances pb variance a b s)
+        in
+        state, { check with compare_sorts; compare_instances; compare_cumul_instances }
+      in
       let reds = RedFlags.red_add_transparent RedFlags.betaiotazeta trans in
       let infos = create_conv_infos ~univs:graph ~evars reds env in
       let module Error = struct type payload += Error of err end in
@@ -1385,6 +1421,7 @@ let clos_gen_conv (type err) ~typed ~use_cache trans cv_pb l2r evars env graph u
         rgt_tab = create_tab ();
         err_ret = box;
         cnv_cache = cache;
+        cnv_state_token = state_token;
       } in
       try Result.Ok (ccnv ~cache:false cv_pb l2r infos el_id el_id (inject t1) (inject t2) univs)
       with
@@ -1436,7 +1473,7 @@ let () =
       let qual_equal q1 q2 = CClosure.eq_quality infos q1 q2 in
       let infos = { cnv_inf = infos; cnv_typ = true; cnv_td = false;
                     cnv_common = false; lft_tab = tab; rgt_tab = tab;
-                    err_ret = box; cnv_cache = None; } in
+                    err_ret = box; cnv_cache = None; cnv_state_token = None; } in
       let state', _ = ccnv ~cache:true CONV false infos el_id el_id a b (state, checked_universes_gen false qual_equal) in
       assert (state==state');
       true
@@ -1462,10 +1499,15 @@ let gen_conv ~typed cv_pb ?(l2r=false) ?(reds=TransparentState.full) env ?(evars
 let conv = gen_conv ~typed:false CONV
 let conv_leq = gen_conv ~typed:false CUMUL
 
-let generic_conv cv_pb ~l2r reds env ?(evars=default_evar_handler env) state t1 t2 =
+let generic_conv ?(cache_fixed_constraints=false) cv_pb ~l2r reds env
+    ?(evars=default_evar_handler env) state t1 t2 =
   let graph = Environ.universes env in
-  let use_cache = (snd state).compare_irrelevant in
-  match clos_gen_conv ~typed:false ~use_cache reds cv_pb l2r evars env graph state t1 t2 with
+  (* Only immutable idempotent union of fixed operation obligations supports
+     stateful hits; mere monotonicity is insufficient.
+     Arbitrary comparers retain the conservative uncached path. *)
+  let use_cache = cache_fixed_constraints && (snd state).compare_irrelevant in
+  match clos_gen_conv ~cache_fixed_constraints:use_cache ~typed:false ~use_cache
+      reds cv_pb l2r evars env graph state t1 t2 with
   | Result.Ok (s, _) -> Result.Ok s
   | Result.Error e -> Result.Error e
 

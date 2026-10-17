@@ -800,10 +800,19 @@ let inh_conv_coerce_to ?loc ~program_mode ~resolve_tc ?use_coercions env sigma ?
 let inh_conv_coerce_rigid_to ?loc ~program_mode ~resolve_tc ?use_coercions env sigma ?flags =
   inh_conv_coerce_to_gen ?loc ~program_mode ~resolve_tc ?use_coercions true ?flags env sigma
 
+(* Checking an already entailed universe relation does not instantiate its
+   flexible variables. Keep inference active until universe and quality
+   variables are resolved, since their assignments affect later elaboration. *)
+let has_unresolved_sort_variables sigma =
+  let ((qualities, _), _) = Evd.sort_context_set sigma in
+  not (Sorts.QVar.Set.is_empty qualities) ||
+  UnivFlex.fold (fun _ ~is_defined unresolved -> unresolved || not is_defined)
+    (Evd.universe_subst sigma) false
+
 (* The caller supplies regularity; absence of unresolved term holes alone
    does not establish it. Stateful inference remains the fallback. *)
 let is_conv_known_types env sigma (flags : Evarconv.unify_flags) t expected =
-  if not flags.modulo_betaiota ||
+  if not flags.modulo_betaiota || has_unresolved_sort_variables sigma ||
       Evarutil.has_undefined_evars_or_metas sigma t ||
       Evarutil.has_undefined_evars_or_metas sigma expected then false
   else

@@ -243,8 +243,19 @@ type clos_pair_key = {
 let subs_hash_rel h i = h * 0x9E3779B9 + (i * 2 + 1)
 let subs_hash_val h k sc = h * 0x9E3779B9 + ((subs_content_fid sc lsl 5) lxor (k * 2))
 
+(* Limit the work spent hashing each substitution. Repeatedly hashing long
+   prefixes can be quadratic; larger keys bypass the closure-pair cache. *)
+exception ClosHashBudget
+
 let subs_hash s =
-  let (h, shft) = Esubst.Internal.fold subs_hash_rel subs_hash_val 0 s in
+  let fuel = ref 128 in
+  let consume () =
+    decr fuel;
+    if !fuel < 0 then raise ClosHashBudget
+  in
+  let frel h i = consume (); subs_hash_rel h i in
+  let fval h k sc = consume (); subs_hash_val h k sc in
+  let (h, shft) = Esubst.Internal.fold frel fval 0 s in
   h * 0x9E3779B9 + shft
 
 let subs_equal s1 s2 = Esubst.Internal.equal subs_content_equal s1 s2
@@ -729,11 +740,12 @@ let rec ccnv ?(common = false) ~cache:docache cv_pb l2r infos lft1 lft2 term1 te
             | Some cp ->
               match fterm_of v1, fterm_of v2 with
               | FCLOS (c1, (s1, u1)), FCLOS (c2, (s2, u2)) ->
-                Some (cp,
+                begin try Some (cp,
                       { ck_hash = clos_pair_hash c1 s1 c2 s2 lid1 lid2 pb;
                         ck_c1 = c1; ck_s1 = s1; ck_u1 = u1;
                         ck_c2 = c2; ck_s2 = s2; ck_u2 = u2;
                         ck_lid1 = lid1; ck_lid2 = lid2; ck_pb = pb })
+                with ClosHashBudget -> None end
               | _ -> None
           in
           let cached = match ckey with

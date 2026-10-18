@@ -74,8 +74,8 @@ let obligation =
   UnivProblem.UEq (Sorts.sort_of_univ (Univ.Universe.make a),
     Sorts.sort_of_univ (Univ.Universe.make b))
 
-let generic initial l r =
-  match Conversion.generic_conv Conversion.CONV ~l2r:false
+let generic ?(cache_fixed_constraints=false) initial l r =
+  match Conversion.generic_conv ~cache_fixed_constraints Conversion.CONV ~l2r:false
     TransparentState.full env (initial, comparer) l r with
   | Ok s -> UnivProblem.Set.equal (UnivProblem.Set.add obligation initial) s
   | Error _ -> false
@@ -98,11 +98,27 @@ let inferred l r =
   | Some s -> UGraph.check_constraints required (Evd.universes s)
   | None -> false
 
+let lifted t = mkLambda (annot, mkProp, Vars.lift 1 t)
+let rec deepen n flag t =
+  if n = 0 then t else deepen (n - 1) flag (apply flag t)
+let deep_left, deep_right = deepen 24 p left, deepen 24 q right
+
 (* Congruence compares the physically shared ta/tb pair, then rejects p/q.
    FFlex delta fallback drops that speculative state and reaches the same
    pair in K's opaque application. A Boolean hit must not lose the
    required equality. *)
 let tests = [
+  mk_bool_test "inference-cache-fixed"
+    "cached fixed constraints survive nested fallback"
+    (generic ~cache_fixed_constraints:true UnivProblem.Set.empty
+      nested_left nested_right);
+  mk_bool_test "inference-cache-fixed-deep"
+    "seeded fixed constraints survive repeated fallback"
+    (generic ~cache_fixed_constraints:true
+      (UnivProblem.Set.singleton obligation) deep_left deep_right);
+  mk_bool_test "inference-cache-lifted"
+    "conversion under binders preserves rolled-back equality"
+    (inferred (lifted nested_left) (lifted nested_right));
   mk_bool_test "inference-cache-rollback" "frontend preserves rolled-back equality"
     (inferred left right);
   mk_bool_test "inference-cache-nested" "nested fallbacks preserve equality"

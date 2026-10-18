@@ -377,12 +377,16 @@ type 'e conv_tab = {
 (** Invariant: for any tl ∈ lft_tab and tr ∈ rgt_tab, there is no mutable memory
     location contained both in tl and in tr. *)
 
+let cc_clear cache =
+  Array.fill cache.cc_key1 0 (Array.length cache.cc_key1) 0;
+  cache.cc_cnt <- 0;
+  cache.max_uid <- 0
+
 (* Keep lift IDs stable: active outer frames may already retain them. *)
 let clear_conversion_entries infos = match infos.cnv_cache with
 | None -> ()
 | Some cache ->
-  Array.fill cache.cc_key1 0 (Array.length cache.cc_key1) 0;
-  cache.cc_cnt <- 0;
+  cc_clear cache;
   (match cache.cc_clos with None -> () | Some cp ->
     ClosPairTbl.clear cp.cp_full)
 
@@ -620,14 +624,18 @@ let rec strip_flift k v = match fterm_of v with
 | FLIFT (n, v') -> strip_flift (k + n) v'
 | _ -> (k, v)
 
-(* Optional cap on cached entries per session (ROCQ_CONV_CACHE_MAX; 0 means
-   unlimited). Unbounded by default: like [clos_tab], the table is
-   session-scoped, so its lifetime bounds memory. *)
-let cc_max_size =
-  match int_of_string (Sys.getenv "ROCQ_CONV_CACHE_MAX") with
-  | 0 -> max_int
-  | n -> n
-  | exception _ -> max_int
+(* Each result cache resets before admitting an entry beyond its positive
+   limit. Unset limits and zero leave the session-scoped caches unbounded. *)
+let cache_limit name = match Sys.getenv_opt name with
+| None -> max_int
+| Some value ->
+  match int_of_string_opt value with
+  | Some 0 -> max_int
+  | Some n when n > 0 -> n
+  | _ -> invalid_arg (name ^ ": expected a nonnegative integer")
+
+let cc_max_size = cache_limit "ROCQ_CONV_CACHE_MAX"
+let cp_max_size = cache_limit "ROCQ_CLOS_MEMO_MAX"
 
 (* The cache is enabled by default; set ROCQ_CONV_CACHE=0 to disable. *)
 let cc_enabled =
@@ -701,14 +709,15 @@ let rec ccnv ?(common = false) ~cache:docache cv_pb l2r infos lft1 lft2 term1 te
         | _ ->
           let add r =
             if usefid then begin
-              let maxid = if fid1 > fid2 then fid1 else fid2 in
-              let () = if maxid > cache.max_uid then cache.max_uid <- maxid in
-              if cache.cc_cnt < cc_max_size then begin
-                if 2 * (cache.cc_cnt + 1) > Array.length cache.cc_key1 then
-                  cc_resize cache;
-                cache.cc_cnt <- cache.cc_cnt + 1;
-                cc_insert_raw cache.cc_key1 cache.cc_key2 cache.cc_meta fid1 fid2 (meta0 lor r)
-              end
+              (* Recursive comparisons may have filled the table since
+                 the probe. Count occupied slots, including duplicate keys. *)
+              if cache.cc_cnt >= cc_max_size then cc_clear cache;
+              if 2 * (cache.cc_cnt + 1) > Array.length cache.cc_key1 then
+                cc_resize cache;
+              cc_insert_raw cache.cc_key1 cache.cc_key2 cache.cc_meta
+                fid1 fid2 (meta0 lor r);
+              cache.cc_cnt <- cache.cc_cnt + 1;
+              cache.max_uid <- max cache.max_uid (max fid1 fid2)
             end
           in
           (* (node, subst) closure-pair probe: only reached when the cell-id
@@ -739,7 +748,10 @@ let rec ccnv ?(common = false) ~cache:docache cv_pb l2r infos lft1 lft2 term1 te
             if cached = 1 then cuniv else raise NotConvertible
           end else begin
             let addc r = match ckey with
-              | Some (cp, k) when cached < 0 ->
+              | Some (cp, k) ->
+                (* Check after recursion, just before this physical admission. *)
+                if ClosPairTbl.length cp.cp_full >= cp_max_size then
+                  ClosPairTbl.clear cp.cp_full;
                 ClosPairTbl.add cp.cp_full k r
               | _ -> ()
             in

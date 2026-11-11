@@ -75,6 +75,18 @@ val loaded_libraries : unit -> DirPath.t list
 
 val library_compiled : DirPath.t -> Safe_typing.compiled_library
 
+(** {6 Tables kept out of the summary} *)
+
+(** Where the opaque proofs of the loaded libraries are found on disk,
+    and the file name of each loaded library. These tables are not part
+    of the summary. A marshalled [Vernacstate.t] reinstalled in another
+    process needs them to access the opaque proofs of the libraries it
+    loaded; [set_disk_tables] adds the given entries to the current
+    tables, the given entry winning when a library is in both. *)
+type disk_tables
+val get_disk_tables : unit -> disk_tables
+val set_disk_tables : disk_tables -> unit
+
 (** {6 Opaque accessors} *)
 val indirect_accessor : Global.indirect_accessor
 [@@deprecated

@@ -227,6 +227,23 @@ let indirect_accessor = {
   Global.access_proof = access_opaque_table;
 }
 
+(* The two tables above that are kept out of the summary, packaged so
+   that a state written to disk can be reinstalled in another process. *)
+type disk_tables = {
+  dt_opaques : table_status DirPath.Map.t;
+  dt_filenames : CUnix.physical_path DirPath.Map.t;
+}
+
+let get_disk_tables () = {
+  dt_opaques = !opaque_tables;
+  dt_filenames = !libraries_filename_table;
+}
+
+let set_disk_tables { dt_opaques; dt_filenames } =
+  opaque_tables := DirPath.Map.fold DirPath.Map.add dt_opaques !opaque_tables;
+  libraries_filename_table :=
+    DirPath.Map.fold DirPath.Map.add dt_filenames !libraries_filename_table
+
 (************************************************************************)
 (* Internalise libraries *)
 
